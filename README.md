@@ -7,9 +7,7 @@ Both drones run as separate PX4 SITL instances inside a single Docker container,
 ## Requirements
 
 - Docker
-- Python 3.11+ with [Poetry](https://python-poetry.org/)
-- `models/ctde_agent_marl9.pth` — trained weights (not committed)
-- NVIDIA GPU recommended; CPU fallback works
+- Python 3.11 with Poetry
 
 ## Running
 
@@ -17,17 +15,8 @@ Both drones run as separate PX4 SITL instances inside a single Docker container,
 # install deps
 poetry install
 
-# build the image and start the container (both PX4 instances run inside it)
-make up
-
-# wait ~60s for SITL to initialize, then run
-make run
-
-# stream container output while it's running
-make logs
-
-# tear everything down
-make down
+# run simulation (sets up docker image for you)
+poetry run px4med
 ```
 
 If you already have SITL running externally (e.g. for debugging), skip the Docker lifecycle:
@@ -35,8 +24,6 @@ If you already have SITL running externally (e.g. for debugging), skip the Docke
 ```bash
 poetry run px4med --no-docker --episodes 1
 ```
-
-Logs are written as jsonlines to `logs/` with a timestamp prefix (`steps` and `episodes` files).
 
 ## Ports
 
