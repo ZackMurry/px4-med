@@ -1,12 +1,4 @@
-"""Coordinator — owns both Drone instances, drives the per-step inference loop.
-
-Each tick:
-  1. Gather telemetry from both drones.
-  2. Build joint state vector (280 floats).
-  3. Run policy inference → action for each agent.
-  4. Dispatch waypoint offsets (or land command).
-  5. Check termination conditions.
-"""
+"""Coordinator — drives the policy using training-env state over PX4 SITL."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +6,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from .actions import CRUISE_DOWN_M, action_to_offset, is_land_action
+from .actions import CRUISE_DOWN_M
 from .drone import Telemetry
 from .metrics import StepRecord
 from .state import build_state
@@ -75,6 +67,11 @@ class Coordinator:
         landed = [False, False]
         step = 0
         loop = asyncio.get_running_loop()
+        total_reward = 0.0
+        episode_wind_entries = [0, 0]
+        episode_low_signal_entries = [0, 0]
+        episode_obstacle_collisions = 0
+        episode_agent_collisions = 0
 
         while step < max_steps and not all(landed):
             step_start = loop.time()
@@ -84,18 +81,11 @@ class Coordinator:
                 await asyncio.gather(*(d.get_telemetry() for d in self.drones))
             )
 
-            # 2. Check deliveries against world
-            step_deliveries: list[int] = []
-            for i, telem in enumerate(telems):
-                if landed[i]:
-                    continue
-                pid = self.world.check_delivery(i, telem.north_m, telem.east_m)
-                if pid is not None:
-                    step_deliveries.append(pid)
-                    logger.info(
-                        "Episode %d step %d: drone %d delivered patient %d",
-                        episode, step, i, pid,
-                    )
+            # 2. Sync quantised grid positions from telemetry before building state.
+            self.world.agent_grids = [
+                self.world.get_grid_pos(telem.north_m, telem.east_m)
+                for telem in telems
+            ]
 
             # 3. Build per-agent state vectors
             states = [
@@ -110,7 +100,19 @@ class Coordinator:
             ]
             logger.debug("Episode %d step %d: actions=%s", episode, step, actions)
 
-            # 5. Log step
+            # 5. Advance world state using the training-env transition logic.
+            step_data = self.world.step(actions)
+            total_reward += sum(step_data["rewards"])
+            for i in range(2):
+                episode_wind_entries[i] += step_data["wind_entries"][i]
+                episode_low_signal_entries[i] += step_data["low_signal_entries"][i]
+            episode_obstacle_collisions += step_data["obstacle_collisions"]
+            episode_agent_collisions += step_data["agent_collisions"]
+
+            step_deliveries = list(step_data["deliveries"])
+            logger.debug("Episode %d step %d: rewards=%s", episode, step, step_data["rewards"])
+
+            # 6. Log step
             self.metrics.log_step(StepRecord(
                 episode=episode,
                 step=step,
@@ -123,22 +125,27 @@ class Coordinator:
                 drone1_battery=telems[1].battery_pct,
                 actions=actions,
                 deliveries=step_deliveries,
+                rewards=step_data["rewards"],
+                simulated_positions=[list(pos) for pos in step_data["sim_positions"]],
+                wind_entries=step_data["wind_entries"],
+                low_signal_entries=step_data["low_signal_entries"],
+                obstacle_collisions=step_data["obstacle_collisions"],
+                agent_collisions=step_data["agent_collisions"],
+                landing_attempts=step_data["landing_attempts"],
+                landed_this_step=step_data["landed_this_step"],
             ))
 
-            # 6. Dispatch actions concurrently
+            # 7. Dispatch the world-approved transition targets.
             await asyncio.gather(*(
-                self._dispatch(i, actions[i], telems[i], landed)
+                self._dispatch(i, landed)
                 for i in range(2)
             ))
-            # Mark drones that chose to land as landed
-            for i in range(2):
-                if is_land_action(actions[i]):
-                    landed[i] = True
-
-            # 7. Advance world state (timers, hazard zones, new patients)
-            self.world.step()
+            landed = list(self.world.landed)
 
             step += 1
+
+            if step_data["done"]:
+                break
 
             # 8. Pace at step_hz (sleep any remaining budget in this interval)
             elapsed = loop.time() - step_start
@@ -164,23 +171,26 @@ class Coordinator:
         episode_deaths = sum(
             1 for p in self.world.patients if p.delivered and not p.actually_delivered
         )
+        episode_spawned = sum(1 for p in self.world.patients if p.active)
         both_landed = all(t.is_landed for t in final_telems)
         batteries = [t.battery_pct for t in final_telems]
-        triage_eff = (
-            episode_deliveries / (episode_deliveries + episode_deaths)
-            if (episode_deliveries + episode_deaths) > 0
-            else 0.0
-        )
+        triage = self.world.triage_summary()
 
         summary = {
             "episode": episode,
             "steps": step,
             "patients_delivered": episode_deliveries,
             "patients_died": episode_deaths,
+            "patients_spawned": episode_spawned,
             "both_landed": both_landed,
             "battery_remaining": batteries,
-            "total_reward": float(episode_deliveries),
-            "triage_efficiency": triage_eff,
+            "simulated_battery_remaining": list(self.world.batteries),
+            "total_reward": total_reward,
+            "triage_efficiency": float(triage["triage_efficiency"]),
+            "wind_entries": episode_wind_entries,
+            "low_signal_entries": episode_low_signal_entries,
+            "obstacle_collisions": episode_obstacle_collisions,
+            "agent_collisions": episode_agent_collisions,
         }
         logger.info("Episode %d complete: %s", episode, summary)
         return summary
@@ -188,20 +198,19 @@ class Coordinator:
     async def _dispatch(
         self,
         drone_idx: int,
-        action: int,
-        telem: Telemetry,
         landed: list[bool],
     ) -> None:
-        """Send one action to one drone; skip if already landed."""
+        """Send one world-approved target to one drone; skip if already landed."""
         if landed[drone_idx]:
             return
         drone = self.drones[drone_idx]
-        if is_land_action(action):
+        if self.world.landed[drone_idx]:
             await drone.land()
         else:
-            offset = action_to_offset(action)
+            grid_x, grid_y = self.world.agent_grids[drone_idx]
+            north_m, east_m = self.world.grid_to_ned(grid_x, grid_y)
             await drone.send_waypoint(
-                telem.north_m + offset.d_north,
-                telem.east_m + offset.d_east,
+                north_m,
+                east_m,
                 CRUISE_DOWN_M,
             )

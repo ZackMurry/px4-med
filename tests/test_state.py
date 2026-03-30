@@ -1,9 +1,9 @@
-"""Verifies state vector construction matches training env output given mock telemetry.
+"""Verifies state vector construction matches the training env output.
 
 Tests are ordered from simplest to most complete:
   1. Length / slice offsets
   2. Individual feature groups with known values
-  3. Full cross-validation against AneeshMARL5.Environment (obstacles + zones cleared)
+  3. Full cross-validation against train.Environment
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ _CFG = {"grid": {"size": 50, "meters_per_cell": 2.0}}
 def _world(wind: set | None = None, ls: set | None = None) -> WorldEnvironment:
     w = WorldEnvironment(_CFG)
     w.reset()
+    w.obstacles = set()
     w.wind_zones = wind if wind is not None else set()
     w.low_signal_zones = ls if ls is not None else set()
     return w
@@ -89,13 +90,18 @@ def test_position_normalised():
 
 
 def test_battery_normalised():
-    s = build_state(0, _telem(5, 5, battery=60.0), _telem(10, 10), _world())
+    w = _world()
+    w.batteries[0] = 60.0
+    s = build_state(0, _telem(5, 5, battery=60.0), _telem(10, 10), w)
     assert s[3] == pytest.approx(60.0 / 100.0)
 
 
 def test_landed_flag():
-    s_flying = build_state(0, _telem(5, 5, landed=False), _telem(1, 1), _world())
-    s_landed = build_state(0, _telem(5, 5, landed=True), _telem(1, 1), _world())
+    w_flying = _world()
+    w_landed = _world()
+    w_landed.landed[0] = True
+    s_flying = build_state(0, _telem(5, 5, landed=False), _telem(1, 1), w_flying)
+    s_landed = build_state(0, _telem(5, 5, landed=True), _telem(1, 1), w_landed)
     assert s_flying[4] == pytest.approx(0.0)
     assert s_landed[4] == pytest.approx(1.0)
 
@@ -209,14 +215,13 @@ def test_low_signal_zone_in_local_grid():
     assert ls == pytest.approx(expected, abs=1e-6)
 
 
-# ── cross-validation against AneeshMARL5.Environment ─────────────────────────
+# ── cross-validation against train.Environment ─────────────────────────
 
 def test_state_matches_training_env():
-    """Full round-trip: our build_state() must equal training get_state() (no obstacles/zones)."""
-    from AneeshMARL5 import Environment as TrainingEnv
+    """Full round-trip: our build_state() must equal training get_state()."""
+    from train import Environment as TrainingEnv
 
     tr = TrainingEnv(fixed_layout=True)
-    tr.obstacles = set()
     tr.wind_zones = []
     tr.low_signal_zones = []
 
@@ -227,6 +232,7 @@ def test_state_matches_training_env():
             for i, pos in enumerate(tr.patient_positions)
         ],
         "landing_zones": [{"grid": list(lz)} for lz in tr.landing_zones],
+        "obstacles": [{"grid": list(obs)} for obs in sorted(tr.obstacles)],
     }
     w = WorldEnvironment(config)
     w.reset()
@@ -236,6 +242,8 @@ def test_state_matches_training_env():
         p.delivered = tr.patients_delivered[i]
         p.timer = tr.patient_timers[i]
         p.weight = int(tr.patient_weights[i])
+    w.batteries = list(tr.batteries)
+    w.landed = list(tr.landed)
     w.wind_zones = set()
     w.low_signal_zones = set()
 
@@ -267,8 +275,5 @@ def test_state_matches_training_env():
         assert our_state[:65] == pytest.approx(tr_state[:65], abs=1e-5), \
             f"Agent {agent_idx}: base+patient mismatch\nours={our_state[:65]}\nref ={tr_state[:65]}"
 
-        # obs_grid (65:90): training env has random obstacles, SITL has none — skip
-
-        # wind + ls grids: both cleared to zero, must match
-        assert our_state[90:] == pytest.approx(tr_state[90:], abs=1e-5), \
-            f"Agent {agent_idx}: wind/ls grid mismatch"
+        assert our_state[65:] == pytest.approx(tr_state[65:], abs=1e-5), \
+            f"Agent {agent_idx}: local grid mismatch"

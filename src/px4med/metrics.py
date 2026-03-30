@@ -26,6 +26,14 @@ class StepRecord:
     drone1_battery: float
     actions: list[int]
     deliveries: list[int]  # patient indices delivered this step
+    rewards: list[float]
+    simulated_positions: list[list[int]]
+    wind_entries: list[int]
+    low_signal_entries: list[int]
+    obstacle_collisions: int
+    agent_collisions: int
+    landing_attempts: list[bool]
+    landed_this_step: list[bool]
 
 
 @dataclass
@@ -34,10 +42,16 @@ class EpisodeRecord:
     steps: int
     patients_delivered: int
     patients_died: int
+    patients_spawned: int
     both_landed: bool
     battery_remaining: list[float]
+    simulated_battery_remaining: list[float]
     total_reward: float
     triage_efficiency: float
+    wind_entries: list[int]
+    low_signal_entries: list[int]
+    obstacle_collisions: int
+    agent_collisions: int
 
 
 class MetricsCollector:

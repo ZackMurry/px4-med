@@ -4,8 +4,8 @@ Layout (must exactly match AneeshMARL5.py Environment.get_state()):
   [0]       agent_id               (0.0 or 1.0)
   [1]       x_norm                 (grid_x / GRID_SIZE)
   [2]       y_norm                 (grid_y / GRID_SIZE)
-  [3]       battery_norm           (battery_pct / MAX_BATTERY)
-  [4]       landed_flag            (1.0 if landed else 0.0)
+  [3]       battery_norm           (sim_battery_pct / MAX_BATTERY)
+  [4]       landed_flag            (1.0 if virtually landed else 0.0)
   [5]       other_dx               ((other_x - x) / GRID_SIZE)
   [6]       other_dy               ((other_y - y) / GRID_SIZE)
   [7]       lz_dir_x               (unit vector x toward landing zone)
@@ -76,8 +76,8 @@ def build_state(
         float(agent_idx),
         x_f / grid_size,
         y_f / grid_size,
-        telem_self.battery_pct / MAX_BATTERY,
-        1.0 if telem_self.is_landed else 0.0,
+        world.batteries[agent_idx] / MAX_BATTERY,
+        1.0 if world.landed[agent_idx] else 0.0,
         (ox_f - x_f) / grid_size,
         (oy_f - y_f) / grid_size,
         lz_dir_x,
@@ -112,8 +112,7 @@ def build_state(
         for dx in range(-2, 3):
             cx, cy = x_i + dx, y_i + dy
             oob = cx < 0 or cx >= grid_size or cy < 0 or cy >= grid_size
-            # No physical obstacles in SITL; OOB cells are treated as blocked
-            obs_grid.append(1.0 if oob else 0.0)
+            obs_grid.append(1.0 if oob or (cx, cy) in world.obstacles else 0.0)
             wind_grid.append(1.0 if not oob and (cx, cy) in world.wind_zones else 0.0)
             ls_grid.append(1.0 if not oob and (cx, cy) in world.low_signal_zones else 0.0)
 

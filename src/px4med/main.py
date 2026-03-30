@@ -25,7 +25,7 @@ async def _async_main() -> None:
         help="Path to experiment YAML config (default: config/experiment.yaml)",
     )
     parser.add_argument(
-        "--model", type=Path, default=Path("models/ctde_agent_marl9.pth"),
+        "--model", type=Path, default=Path("models/agent_marl9.pth"),
         help="Path to trained .pth policy file",
     )
     parser.add_argument(
@@ -130,17 +130,25 @@ async def _async_main() -> None:
                 steps=summary["steps"],
                 patients_delivered=summary["patients_delivered"],
                 patients_died=summary["patients_died"],
+                patients_spawned=summary["patients_spawned"],
                 both_landed=summary["both_landed"],
                 battery_remaining=summary["battery_remaining"],
+                simulated_battery_remaining=summary["simulated_battery_remaining"],
                 total_reward=summary["total_reward"],
                 triage_efficiency=summary["triage_efficiency"],
+                wind_entries=summary["wind_entries"],
+                low_signal_entries=summary["low_signal_entries"],
+                obstacle_collisions=summary["obstacle_collisions"],
+                agent_collisions=summary["agent_collisions"],
             ))
             logger.info(
-                "Episode %d result: delivered=%d died=%d eff=%.2f steps=%d",
+                "Episode %d result: delivered=%d/%d died=%d eff=%.2f reward=%.2f steps=%d",
                 ep,
                 summary["patients_delivered"],
+                summary["patients_spawned"],
                 summary["patients_died"],
                 summary["triage_efficiency"],
+                summary["total_reward"],
                 summary["steps"],
             )
 
