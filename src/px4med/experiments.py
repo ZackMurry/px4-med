@@ -248,8 +248,8 @@ def main() -> None:
     parser.add_argument(
         "--seed",
         type=int,
-        default=20260330,
-        help="Base random seed for all experiments",
+        default=None,
+        help="Base random seed for all experiments. If omitted, generate one at runtime.",
     )
     parser.add_argument(
         "--log-level",
@@ -327,6 +327,9 @@ def main() -> None:
         suites = filtered_suites
         if not suites:
             raise SystemExit(f"No suites contain requested policy filter(s): {', '.join(args.policy)}")
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(0, 2**32)
+
     logger.info("Backend: %s", args.backend)
     logger.info("Selected suites: %s", ", ".join(suite.name for suite in suites))
     if args.policy:
