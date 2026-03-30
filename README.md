@@ -25,6 +25,34 @@ If you already have SITL running externally (e.g. for debugging), skip the Docke
 poetry run px4med --no-docker --episodes 1
 ```
 
+## Validation Experiments
+
+Run the offline validation suite to generate CSV tables and matplotlib figures:
+
+```bash
+poetry run px4med-experiments
+```
+
+Results are written to `results/validation_<timestamp>/` with:
+
+- `tables/episodes.csv`: per-episode metrics
+- `tables/summary.csv`: aggregated means and 95% CIs
+- `tables/<suite>_summary.csv`: suite-specific tables
+- `figures/*.png`: paper-ready validation plots
+
+Useful options:
+
+```bash
+# run a smaller smoke version
+poetry run px4med-experiments --episodes 5
+
+# run only selected suites
+poetry run px4med-experiments --suite baseline_comparison --suite triage_priority
+
+# choose a custom output directory
+poetry run px4med-experiments --output-dir results/paper_validation
+```
+
 ## Ports
 
 | Drone | Sim TCP | MAVSDK UDP |

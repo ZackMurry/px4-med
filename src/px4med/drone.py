@@ -13,9 +13,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Arrival tolerance for send_waypoint() busy-wait (metres)
-WAYPOINT_ARRIVAL_RADIUS_M = 0.5
+WAYPOINT_ARRIVAL_RADIUS_M = 2.0
 # How long to wait for drone to reach a waypoint before moving on (seconds)
-WAYPOINT_TIMEOUT_S = 30.0
+WAYPOINT_TIMEOUT_S = 1.5
+BASE_XY_CRUISE_M_S = 5.0
+BASE_XY_VEL_MAX_M_S = 12.0
+BASE_Z_VEL_UP_M_S = 3.0
+BASE_Z_VEL_DOWN_M_S = 1.5
 
 
 @dataclass
@@ -94,6 +98,35 @@ class Drone:
         assert self._system is not None, "call connect() first"
         await self._system.action.arm()
         logger.info("Drone %d: armed", self.drone_id)
+
+    async def configure_speed_profile(self, speed_factor: float = 1.0) -> None:
+        """Scale PX4 horizontal/vertical speed limits for faster SITL runs."""
+        assert self._system is not None, "call connect() first"
+        if speed_factor <= 0.0:
+            raise ValueError("speed_factor must be positive")
+
+        async def _set_float(name: str, value: float) -> None:
+            await self._system.param.set_param_float(name, value)
+            logger.info("Drone %d: param %s=%.2f", self.drone_id, name, value)
+
+        xy_cruise = BASE_XY_CRUISE_M_S * speed_factor
+        xy_max = BASE_XY_VEL_MAX_M_S * speed_factor
+        z_up = BASE_Z_VEL_UP_M_S * speed_factor
+        z_down = BASE_Z_VEL_DOWN_M_S * speed_factor
+
+        await _set_float("MPC_XY_CRUISE", xy_cruise)
+        await _set_float("MPC_XY_VEL_MAX", xy_max)
+        await _set_float("MPC_Z_VEL_MAX_UP", z_up)
+        await _set_float("MPC_Z_VEL_MAX_DN", z_down)
+        logger.info(
+            "Drone %d: speed profile factor=%.2f xy_cruise=%.2f xy_max=%.2f z_up=%.2f z_down=%.2f",
+            self.drone_id,
+            speed_factor,
+            xy_cruise,
+            xy_max,
+            z_up,
+            z_down,
+        )
 
     async def takeoff(self, altitude_m: float = 5.0) -> None:
         """Command auto-takeoff and wait until the drone is airborne."""

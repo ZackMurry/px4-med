@@ -91,6 +91,61 @@ class WorldEnvironment:
 
     def __init__(self, config: dict) -> None:
         self.config = config
+        hazard_cfg = config.get("hazards", {})
+        battery_cfg = config.get("battery", {})
+        reward_cfg = config.get("reward", {})
+
+        self.num_wind_zones = int(hazard_cfg.get("num_wind_zones", NUM_WIND_ZONES))
+        self.num_low_signal_zones = int(hazard_cfg.get("num_low_signal_zones", NUM_LOW_SIGNAL_ZONES))
+        self.wind_appear_interval = int(hazard_cfg.get("wind_appear_interval", WIND_APPEAR_INTERVAL))
+        self.low_signal_appear_interval = int(
+            hazard_cfg.get("low_signal_appear_interval", LOW_SIGNAL_APPEAR_INTERVAL)
+        )
+        self.low_signal_failure_prob = float(
+            hazard_cfg.get("low_signal_failure_prob", LOW_SIGNAL_FAILURE_PROB)
+        )
+
+        self.initial_battery = float(battery_cfg.get("initial", MAX_BATTERY))
+        self.battery_drain_per_step = float(
+            battery_cfg.get("drain_per_step", BATTERY_DRAIN_PER_STEP)
+        )
+        self.battery_drain_in_wind = float(
+            battery_cfg.get("drain_in_wind", BATTERY_DRAIN_IN_WIND)
+        )
+        self.low_battery_threshold = float(
+            battery_cfg.get("low_battery_threshold", LOW_BATTERY_THRESHOLD)
+        )
+
+        self.goal_reward = float(reward_cfg.get("goal_reward", GOAL_REWARD))
+        self.step_penalty = float(reward_cfg.get("step_penalty", STEP_PENALTY))
+        self.collision_penalty = float(reward_cfg.get("collision_penalty", COLLISION_PENALTY))
+        self.agent_collision_penalty = float(
+            reward_cfg.get("agent_collision_penalty", AGENT_COLLISION_PENALTY)
+        )
+        self.battery_depletion_penalty = float(
+            reward_cfg.get("battery_depletion_penalty", BATTERY_DEPLETION_PENALTY)
+        )
+        self.low_battery_penalty = float(
+            reward_cfg.get("low_battery_penalty", LOW_BATTERY_PENALTY)
+        )
+        self.wind_penalty = float(reward_cfg.get("wind_penalty", WIND_PENALTY))
+        self.low_signal_penalty = float(
+            reward_cfg.get("low_signal_penalty", LOW_SIGNAL_PENALTY)
+        )
+        self.shaping_factor = float(reward_cfg.get("shaping_factor", SHAPING_FACTOR))
+        self.patient_death_penalty = float(
+            reward_cfg.get("patient_death_penalty", PATIENT_DEATH_PENALTY)
+        )
+        self.landing_reward = float(reward_cfg.get("landing_reward", LANDING_REWARD))
+        self.land_wrong_penalty = float(
+            reward_cfg.get("land_wrong_penalty", LAND_WRONG_PENALTY)
+        )
+        self.closeness_penalty = float(
+            reward_cfg.get("closeness_penalty", CLOSENESS_PENALTY)
+        )
+        self.closeness_radius = int(reward_cfg.get("closeness_radius", CLOSENESS_RADIUS))
+        self.step_clip = float(reward_cfg.get("step_clip", STEP_CLIP))
+
         self.patients: list[Patient] = []
         self.wind_zones: set[tuple[int, int]] = set()
         self.low_signal_zones: set[tuple[int, int]] = set()
@@ -99,12 +154,12 @@ class WorldEnvironment:
         self.landing_zones: list[tuple[float, float]] = []
         self.start_grids: list[tuple[int, int]] = list(_DEFAULT_START_GRIDS)
         self.agent_grids: list[tuple[int, int]] = list(_DEFAULT_START_GRIDS)
-        self.batteries: list[float] = [MAX_BATTERY, MAX_BATTERY]
+        self.batteries: list[float] = [self.initial_battery, self.initial_battery]
         self.landed: list[bool] = [False, False]
 
         self._new_patient_timer: int = NEW_PATIENT_SPAWN_INTERVAL
-        self._wind_timer: int = WIND_APPEAR_INTERVAL
-        self._ls_timer: int = LOW_SIGNAL_APPEAR_INTERVAL
+        self._wind_timer: int = self.wind_appear_interval
+        self._ls_timer: int = self.low_signal_appear_interval
         self._step_count: int = 0
 
     # ------------------------------------------------------------------
@@ -120,12 +175,12 @@ class WorldEnvironment:
             for p in self.config.get("agent_start_positions", _DEFAULT_START_GRIDS)
         ]
         self.agent_grids = list(self.start_grids)
-        self.batteries = [MAX_BATTERY, MAX_BATTERY]
+        self.batteries = [self.initial_battery, self.initial_battery]
         self.landed = [False, False]
 
         # Obstacles
         obs_cfgs = self.config.get("obstacles")
-        if obs_cfgs:
+        if obs_cfgs is not None:
             self.obstacles = {tuple(obs["grid"]) for obs in obs_cfgs}
         else:
             self.obstacles = self._generate_obstacles()
@@ -180,8 +235,8 @@ class WorldEnvironment:
         self.wind_zones = set()
         self.low_signal_zones = set()
         self._new_patient_timer = NEW_PATIENT_SPAWN_INTERVAL
-        self._wind_timer = WIND_APPEAR_INTERVAL
-        self._ls_timer = LOW_SIGNAL_APPEAR_INTERVAL
+        self._wind_timer = self.wind_appear_interval
+        self._ls_timer = self.low_signal_appear_interval
         self._step_count = 0
 
     # ------------------------------------------------------------------
@@ -203,18 +258,18 @@ class WorldEnvironment:
             self._wind_timer -= 1
         else:
             self.wind_zones = set(
-                random.sample(interior, min(NUM_WIND_ZONES, len(interior)))
+                random.sample(interior, min(self.num_wind_zones, len(interior)))
             )
-            self._wind_timer = WIND_APPEAR_INTERVAL
+            self._wind_timer = self.wind_appear_interval
 
         # Low-signal zones
         if self._ls_timer > 0:
             self._ls_timer -= 1
         else:
             self.low_signal_zones = set(
-                random.sample(interior, min(NUM_LOW_SIGNAL_ZONES, len(interior)))
+                random.sample(interior, min(self.num_low_signal_zones, len(interior)))
             )
-            self._ls_timer = LOW_SIGNAL_APPEAR_INTERVAL
+            self._ls_timer = self.low_signal_appear_interval
 
     def step(self, actions: list[int]) -> dict:
         """Apply one training-env transition from the current world state."""
@@ -234,7 +289,7 @@ class WorldEnvironment:
                     self.manhattan_distance(old_positions[i], self.landing_grid(i))
                 )
 
-        step_rewards = [STEP_PENALTY, STEP_PENALTY]
+        step_rewards = [self.step_penalty, self.step_penalty]
         milestone_rewards = [0.0, 0.0]
         step_data = {
             "wind_entries": [0, 0],
@@ -262,14 +317,14 @@ class WorldEnvironment:
                 if (x, y) == self.landing_grid(agent_idx):
                     self.landed[agent_idx] = True
                     step_data["landed_this_step"][agent_idx] = True
-                    milestone_rewards[agent_idx] += LANDING_REWARD
+                    milestone_rewards[agent_idx] += self.landing_reward
                 else:
-                    step_rewards[agent_idx] += LAND_WRONG_PENALTY
+                    step_rewards[agent_idx] += self.land_wrong_penalty
                 new_positions.append((x, y))
                 continue
 
             in_low_signal = (x, y) in self.low_signal_zones
-            if in_low_signal and random.random() < LOW_SIGNAL_FAILURE_PROB:
+            if in_low_signal and random.random() < self.low_signal_failure_prob:
                 new_x, new_y = x, y
             else:
                 if action == 0:
@@ -290,7 +345,7 @@ class WorldEnvironment:
                 or new_y >= grid_size
                 or (new_x, new_y) in self.obstacles
             ):
-                milestone_rewards[agent_idx] += COLLISION_PENALTY
+                milestone_rewards[agent_idx] += self.collision_penalty
                 step_data["obstacle_collisions"] += 1
                 new_x, new_y = x, y
 
@@ -299,7 +354,7 @@ class WorldEnvironment:
         active = [i for i in range(2) if not self.landed[i]]
         if len(active) == 2 and new_positions[active[0]] == new_positions[active[1]]:
             for i in active:
-                milestone_rewards[i] += AGENT_COLLISION_PENALTY
+                milestone_rewards[i] += self.agent_collision_penalty
                 new_positions[i] = old_positions[i]
             step_data["agent_collisions"] += 1
 
@@ -309,9 +364,9 @@ class WorldEnvironment:
         active_agents = [i for i in range(2) if not self.landed[i]]
         if len(active_agents) == 2:
             dist = abs(new_positions[0][0] - new_positions[1][0]) + abs(new_positions[0][1] - new_positions[1][1])
-            if dist < CLOSENESS_RADIUS:
+            if dist < self.closeness_radius:
                 for i in active_agents:
-                    step_rewards[i] += CLOSENESS_PENALTY
+                    step_rewards[i] += self.closeness_penalty
 
         for i in range(2):
             if self.landed[i]:
@@ -319,21 +374,21 @@ class WorldEnvironment:
 
             in_wind = self.agent_grids[i] in self.wind_zones
             if in_wind:
-                self.batteries[i] -= BATTERY_DRAIN_PER_STEP + BATTERY_DRAIN_IN_WIND
-                step_rewards[i] += WIND_PENALTY
+                self.batteries[i] -= self.battery_drain_per_step + self.battery_drain_in_wind
+                step_rewards[i] += self.wind_penalty
                 step_data["wind_entries"][i] += 1
             else:
-                self.batteries[i] -= BATTERY_DRAIN_PER_STEP
+                self.batteries[i] -= self.battery_drain_per_step
 
             if self.agent_grids[i] in self.low_signal_zones:
-                step_rewards[i] += LOW_SIGNAL_PENALTY
+                step_rewards[i] += self.low_signal_penalty
                 step_data["low_signal_entries"][i] += 1
 
-            if 0 < self.batteries[i] < LOW_BATTERY_THRESHOLD:
-                step_rewards[i] += LOW_BATTERY_PENALTY
+            if 0 < self.batteries[i] < self.low_battery_threshold:
+                step_rewards[i] += self.low_battery_penalty
 
             if self.batteries[i] <= 0:
-                milestone_rewards[i] += BATTERY_DEPLETION_PENALTY
+                milestone_rewards[i] += self.battery_depletion_penalty
                 self.batteries[i] = 0.0
 
         self._advance_patients(milestone_rewards)
@@ -346,7 +401,7 @@ class WorldEnvironment:
                     continue
                 if self.agent_grids[i] == self.patient_grid(p.idx):
                     timer_ratio = p.timer / MAX_PATIENT_TIMER
-                    milestone_rewards[i] += GOAL_REWARD * timer_ratio * p.weight
+                    milestone_rewards[i] += self.goal_reward * timer_ratio * p.weight
                     p.delivered = True
                     p.actually_delivered = True
                     step_data["deliveries"].append(p.idx)
@@ -359,10 +414,10 @@ class WorldEnvironment:
                 new_dist = self.manhattan_distance(self.agent_grids[i], self.patient_grid(nearest))
             else:
                 new_dist = self.manhattan_distance(self.agent_grids[i], self.landing_grid(i))
-            step_rewards[i] += SHAPING_FACTOR * (old_shaping_dist[i] - new_dist)
+            step_rewards[i] += self.shaping_factor * (old_shaping_dist[i] - new_dist)
 
         rewards = [
-            max(-STEP_CLIP, min(STEP_CLIP, step_rewards[i])) + milestone_rewards[i]
+            max(-self.step_clip, min(self.step_clip, step_rewards[i])) + milestone_rewards[i]
             for i in range(2)
         ]
         done = all(self.landed) or any(b <= 0 for b in self.batteries)
@@ -395,8 +450,8 @@ class WorldEnvironment:
                 continue
             p.timer -= 1
             if p.timer <= 0:
-                milestone_rewards[0] += PATIENT_DEATH_PENALTY / 2
-                milestone_rewards[1] += PATIENT_DEATH_PENALTY / 2
+                milestone_rewards[0] += self.patient_death_penalty / 2
+                milestone_rewards[1] += self.patient_death_penalty / 2
                 p.delivered = True
                 continue
 

@@ -7,10 +7,25 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
+import json
 from pathlib import Path
 from typing import Any
 
-import jsonlines
+try:
+    import jsonlines  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback for minimal environments
+    jsonlines = None
+
+
+class _JsonlWriter:
+    def __init__(self, path: Path) -> None:
+        self._handle = path.open("w", encoding="utf-8")
+
+    def write(self, obj: dict[str, Any]) -> None:
+        self._handle.write(json.dumps(obj) + "\n")
+
+    def close(self) -> None:
+        self._handle.close()
 
 
 @dataclass
@@ -27,6 +42,8 @@ class StepRecord:
     actions: list[int]
     deliveries: list[int]  # patient indices delivered this step
     rewards: list[float]
+    remaining_patients: int
+    target_distances: list[int]
     simulated_positions: list[list[int]]
     wind_entries: list[int]
     low_signal_entries: list[int]
@@ -64,12 +81,14 @@ class MetricsCollector:
         self._episode_writer: Any = None
 
     def open(self, run_id: str) -> None:
-        self._step_writer = jsonlines.open(
-            self.log_dir / f"{run_id}_steps.jsonl", mode="w"
-        )
-        self._episode_writer = jsonlines.open(
-            self.log_dir / f"{run_id}_episodes.jsonl", mode="w"
-        )
+        step_path = self.log_dir / f"{run_id}_steps.jsonl"
+        episode_path = self.log_dir / f"{run_id}_episodes.jsonl"
+        if jsonlines is not None:
+            self._step_writer = jsonlines.open(step_path, mode="w")
+            self._episode_writer = jsonlines.open(episode_path, mode="w")
+        else:
+            self._step_writer = _JsonlWriter(step_path)
+            self._episode_writer = _JsonlWriter(episode_path)
 
     def log_step(self, record: StepRecord) -> None:
         if self._step_writer:

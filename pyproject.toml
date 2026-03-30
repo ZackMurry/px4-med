@@ -15,9 +15,11 @@ pyyaml = ">=6.0"
 jsonlines = ">=3.1.0"
 docker = ">=6.0.0"
 pygame = "^2.6.1"
+matplotlib = ">=3.8.0"
 
 [tool.poetry.scripts]
 px4med = "px4med.main:main"
+px4med-experiments = "px4med.experiments:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

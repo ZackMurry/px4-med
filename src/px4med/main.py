@@ -44,6 +44,10 @@ async def _async_main() -> None:
         "--max-steps", type=int, default=800,
         help="Maximum steps per episode (default: 800)",
     )
+    parser.add_argument(
+        "--speed-factor", type=float, default=3.0,
+        help="Scale PX4 cruise/max horizontal and vertical speed limits (default: 3.0)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -100,6 +104,10 @@ async def _async_main() -> None:
         for d in drones:
             await d.connect()
         logger.info("All drones connected.")
+        if args.speed_factor != 1.0:
+            logger.info("Applying PX4 speed factor %.2f ...", args.speed_factor)
+        for d in drones:
+            await d.configure_speed_profile(args.speed_factor)
 
         # ── Load policy ───────────────────────────────────────────────────
         policy = PolicyNet(args.model)

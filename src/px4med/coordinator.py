@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 # Agent start positions from AneeshMARL5.py fixed_layout: grid (x, y)
 # Agent 0 at (1,1), Agent 1 at (1,13)
 _DEFAULT_START_GRIDS: list[tuple[int, int]] = [(1, 1), (1, 13)]
+_MOVE_ACTIONS = [0, 1, 2, 3]
+_ACTION_DELTAS = {
+    0: (0, -1),
+    1: (0, 1),
+    2: (-1, 0),
+    3: (1, 0),
+}
 
 
 class Coordinator:
@@ -34,16 +42,22 @@ class Coordinator:
         world: WorldEnvironment,
         metrics: MetricsCollector,
         step_hz: float = 2.0,
+        action_delay_steps: int = 0,
+        enable_cycle_breaking: bool = False,
     ) -> None:
         self.drones = drones
         self.policy = policy
         self.world = world
         self.metrics = metrics
         self.step_interval = 1.0 / step_hz
+        self.action_delay_steps = max(0, action_delay_steps)
+        self.enable_cycle_breaking = enable_cycle_breaking
+        self._position_history = [deque(maxlen=8), deque(maxlen=8)]
 
     async def run_episode(self, episode: int = 0, max_steps: int = 800) -> dict:
         """Arm, take off, run RL loop, land all. Return summary dict."""
         self.world.reset()
+        self._position_history = [deque(maxlen=8), deque(maxlen=8)]
 
         # Arm and take off both drones concurrently
         await asyncio.gather(*(d.arm() for d in self.drones))
@@ -72,6 +86,10 @@ class Coordinator:
         episode_low_signal_entries = [0, 0]
         episode_obstacle_collisions = 0
         episode_agent_collisions = 0
+        action_queues = [
+            deque([-1] * self.action_delay_steps)
+            for _ in range(2)
+        ]
 
         while step < max_steps and not all(landed):
             step_start = loop.time()
@@ -86,6 +104,7 @@ class Coordinator:
                 self.world.get_grid_pos(telem.north_m, telem.east_m)
                 for telem in telems
             ]
+            self._record_positions()
 
             # 3. Build per-agent state vectors
             states = [
@@ -94,11 +113,32 @@ class Coordinator:
             ]
 
             # 4. Policy inference (joint state: self ‖ other)
-            actions = [
-                self.policy.select_action(states[i], states[1 - i])
-                for i in range(2)
-            ]
-            logger.debug("Episode %d step %d: actions=%s", episode, step, actions)
+            if hasattr(self.policy, "select_actions"):
+                raw_actions = list(self.policy.select_actions(self.world))
+            else:
+                raw_actions = [
+                    self.policy.select_action(states[i], states[1 - i])
+                    for i in range(2)
+                ]
+
+            if self.enable_cycle_breaking:
+                raw_actions = self._break_loops(raw_actions, step)
+
+            actions: list[int] = []
+            for i, action in enumerate(raw_actions):
+                if self.action_delay_steps > 0:
+                    action_queues[i].append(action)
+                    actions.append(action_queues[i].popleft())
+                else:
+                    actions.append(action)
+
+            logger.debug(
+                "Episode %d step %d: raw_actions=%s executed_actions=%s",
+                episode,
+                step,
+                raw_actions,
+                actions,
+            )
 
             # 5. Advance world state using the training-env transition logic.
             step_data = self.world.step(actions)
@@ -111,6 +151,20 @@ class Coordinator:
 
             step_deliveries = list(step_data["deliveries"])
             logger.debug("Episode %d step %d: rewards=%s", episode, step, step_data["rewards"])
+            logger.info(
+                "Episode %d step %d/%d | actions=%s | sim_pos=%s | remaining=%d | "
+                "target_dist=%s | deliveries=%s | landed=%s | reward=%.2f",
+                episode,
+                step + 1,
+                max_steps,
+                actions,
+                step_data["sim_positions"],
+                self._remaining_patients(),
+                self._target_distances(),
+                step_deliveries,
+                self.world.landed,
+                float(sum(step_data["rewards"])),
+            )
 
             # 6. Log step
             self.metrics.log_step(StepRecord(
@@ -126,6 +180,8 @@ class Coordinator:
                 actions=actions,
                 deliveries=step_deliveries,
                 rewards=step_data["rewards"],
+                remaining_patients=self._remaining_patients(),
+                target_distances=self._target_distances(),
                 simulated_positions=[list(pos) for pos in step_data["sim_positions"]],
                 wind_entries=step_data["wind_entries"],
                 low_signal_entries=step_data["low_signal_entries"],
@@ -214,3 +270,97 @@ class Coordinator:
                 east_m,
                 CRUISE_DOWN_M,
             )
+
+    def _record_positions(self) -> None:
+        for i in range(2):
+            self._position_history[i].append(tuple(self.world.agent_grids[i]))
+
+    def _break_loops(self, actions: list[int], step: int) -> list[int]:
+        adjusted = list(actions)
+        for agent_idx, action in enumerate(actions):
+            if self.world.landed[agent_idx]:
+                continue
+            if not self._is_square_loop(agent_idx):
+                continue
+            if action == 4 and self.world.agent_grids[agent_idx] == self.world.landing_grid(agent_idx):
+                continue
+            override = self._choose_escape_action(agent_idx, action)
+            if override != action:
+                logger.warning(
+                    "Episode step %d: drone %d loop detected at %s, overriding action %s -> %s",
+                    step,
+                    agent_idx,
+                    list(self._position_history[agent_idx]),
+                    action,
+                    override,
+                )
+                adjusted[agent_idx] = override
+        return adjusted
+
+    def _is_square_loop(self, agent_idx: int) -> bool:
+        history = list(self._position_history[agent_idx])
+        if len(history) < 5:
+            return self._is_two_point_loop(agent_idx)
+        recent = history[-5:]
+        return (
+            recent[0] == recent[-1] and len(set(recent[:-1])) == 4
+        ) or self._is_two_point_loop(agent_idx)
+
+    def _is_two_point_loop(self, agent_idx: int) -> bool:
+        history = list(self._position_history[agent_idx])
+        if len(history) < 4:
+            return False
+        recent = history[-4:]
+        return recent[0] == recent[2] and recent[1] == recent[3] and recent[0] != recent[1]
+
+    def _choose_escape_action(self, agent_idx: int, current_action: int) -> int:
+        pos = tuple(self.world.agent_grids[agent_idx])
+        recent_cells = set(self._position_history[agent_idx])
+        target = self._target_grid(agent_idx)
+        grid_size = int(self.world.config.get("grid", {}).get("size", 50))
+        best_action = current_action
+        best_score = float("-inf")
+
+        for action in _MOVE_ACTIONS:
+            if action == current_action:
+                continue
+            dx, dy = _ACTION_DELTAS[action]
+            nxt = (pos[0] + dx, pos[1] + dy)
+            if nxt[0] < 0 or nxt[0] >= grid_size or nxt[1] < 0 or nxt[1] >= grid_size:
+                continue
+            if nxt in self.world.obstacles:
+                continue
+
+            score = 0.0
+            if nxt not in recent_cells:
+                score += 5.0
+            score -= float(self.world.manhattan_distance(nxt, target))
+            score += float(self.world.manhattan_distance(pos, target)) * 0.5
+            if nxt == pos:
+                score -= 10.0
+            if score > best_score:
+                best_score = score
+                best_action = action
+
+        return best_action
+
+    def _target_grid(self, agent_idx: int) -> tuple[int, int]:
+        nearest = self.world.nearest_undelivered_patient(tuple(self.world.agent_grids[agent_idx]))
+        if nearest is not None:
+            return self.world.patient_grid(nearest)
+        return self.world.landing_grid(agent_idx)
+
+    def _remaining_patients(self) -> int:
+        return sum(1 for patient in self.world.patients if patient.active and not patient.delivered)
+
+    def _target_distances(self) -> list[int]:
+        distances: list[int] = []
+        for agent_idx in range(2):
+            if self.world.landed[agent_idx]:
+                distances.append(0)
+                continue
+            target = self._target_grid(agent_idx)
+            distances.append(
+                self.world.manhattan_distance(tuple(self.world.agent_grids[agent_idx]), target)
+            )
+        return distances

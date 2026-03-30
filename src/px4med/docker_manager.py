@@ -42,7 +42,8 @@ class DockerManager:
         log_dir: Optional[Path] = None,
     ) -> None:
         self.image = image
-        self.log_dir = Path(log_dir) if log_dir else Path(__file__).parents[3] / "logs"
+        base_log_dir = Path(log_dir) if log_dir else Path(__file__).parents[3] / "logs"
+        self.log_dir = base_log_dir.expanduser().resolve()
         self.container_id: Optional[str] = None
 
     @property
