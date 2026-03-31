@@ -66,6 +66,7 @@ HAZARD_SUITE = "hazard_sweep"
 HAZARD_SCENARIO = "hazard_high"
 DELAY_SUITE = "delay_sweep"
 DELAY_SCENARIO = "delay_3"
+EPISODE_COOLDOWN_S = 180.0
 
 
 @dataclass(frozen=True)
@@ -720,6 +721,11 @@ def run_parent(args: argparse.Namespace) -> int:
                                     attempt,
                                 )
                                 attempt_dm.stop()
+                                logger.info(
+                                    "Cooling down %.0fs before the next episode attempt",
+                                    args.episode_cooldown_s,
+                                )
+                                time.sleep(args.episode_cooldown_s)
 
                     row = {
                         "timestamp": now_iso(),
@@ -838,6 +844,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--battery-drain-rate", type=float, default=180.0)
     parser.add_argument("--max-hours", type=float, default=12.0)
     parser.add_argument("--episode-timeout-min", type=float, default=45.0)
+    parser.add_argument("--episode-cooldown-s", type=float, default=EPISODE_COOLDOWN_S)
     parser.add_argument("--heartbeat-timeout-s", type=float, default=300.0)
     parser.add_argument("--monitor-interval-s", type=float, default=60.0)
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
