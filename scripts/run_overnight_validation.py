@@ -130,21 +130,21 @@ def configure_logging(log_path: Path | None = None, level: str = "INFO") -> None
 
 
 def build_core_12h_jobs(seed_base: int) -> list[JobSpec]:
-    sequence: list[tuple[str, str, str, int]] = [
-        (NOMINAL_SUITE, NOMINAL_SCENARIO, "learned", 5),
-        (NOMINAL_SUITE, NOMINAL_SCENARIO, "priority_path", 5),
-        (NOMINAL_SUITE, NOMINAL_SCENARIO, "nearest_path", 5),
-        (BATTERY_SUITE, BATTERY_SCENARIO, "learned", 2),
-        (BATTERY_SUITE, BATTERY_SCENARIO, "priority_path", 2),
-        (HAZARD_SUITE, HAZARD_SCENARIO, "learned", 1),
-        (HAZARD_SUITE, HAZARD_SCENARIO, "priority_path", 1),
-        (DELAY_SUITE, DELAY_SCENARIO, "learned", 1),
+    sequence: list[tuple[str, str, str, int, int]] = [
+        (NOMINAL_SUITE, NOMINAL_SCENARIO, "learned", 3, 2),
+        (NOMINAL_SUITE, NOMINAL_SCENARIO, "priority_path", 0, 5),
+        (NOMINAL_SUITE, NOMINAL_SCENARIO, "nearest_path", 0, 5),
+        (BATTERY_SUITE, BATTERY_SCENARIO, "learned", 0, 2),
+        (BATTERY_SUITE, BATTERY_SCENARIO, "priority_path", 0, 2),
+        (HAZARD_SUITE, HAZARD_SCENARIO, "learned", 0, 1),
+        (HAZARD_SUITE, HAZARD_SCENARIO, "priority_path", 0, 1),
+        (DELAY_SUITE, DELAY_SCENARIO, "learned", 0, 1),
     ]
     jobs: list[JobSpec] = []
     seed_offset = 0
     order = 1
-    for suite, scenario, policy, episodes in sequence:
-        for episode in range(episodes):
+    for suite, scenario, policy, start_episode, episode_count in sequence:
+        for episode in range(start_episode, start_episode + episode_count):
             jobs.append(
                 JobSpec(
                     suite=suite,

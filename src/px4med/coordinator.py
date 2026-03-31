@@ -35,6 +35,7 @@ _START_SETTLE_TIMEOUT_S = 10.0
 _START_SETTLE_RADIUS_CELLS = 1
 _MAX_TELEMETRY_STEP_JUMP_CELLS = 8
 _MAX_TRACKING_ERROR_M = 20.0
+_MAX_ALTITUDE_M = 50.0
 
 
 class Coordinator:
@@ -116,6 +117,7 @@ class Coordinator:
             telems: list[Telemetry] = list(
                 await asyncio.gather(*(d.get_telemetry() for d in self.drones))
             )
+            self._validate_altitudes(telems)
 
             # 2. Sync quantised grid positions from telemetry before building state.
             actual_grids = [
@@ -288,6 +290,16 @@ class Coordinator:
                     "Telemetry jump too large for safe SITL/world sync: "
                     f"drone={i} expected_grid={expected} actual_grid={actual} "
                     f"jump_cells={jump_cells} tracking_error_m={tracking_error_m:.1f}"
+                )
+
+    def _validate_altitudes(self, telems: list[Telemetry]) -> None:
+        """Fail fast if a drone climbs above the allowed AGL ceiling."""
+        for i, telem in enumerate(telems):
+            altitude_m = max(0.0, -float(telem.down_m))
+            if altitude_m > _MAX_ALTITUDE_M:
+                raise RuntimeError(
+                    f"Drone exceeded altitude ceiling: drone={i} "
+                    f"altitude_m={altitude_m:.1f} limit_m={_MAX_ALTITUDE_M:.1f}"
                 )
 
     async def _wait_for_start_positions(
