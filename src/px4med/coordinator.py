@@ -33,6 +33,8 @@ _ACTION_DELTAS = {
 _START_REPOSITION_TIMEOUT_S = 12.0
 _START_SETTLE_TIMEOUT_S = 10.0
 _START_SETTLE_RADIUS_CELLS = 1
+_MAX_TELEMETRY_STEP_JUMP_CELLS = 8
+_MAX_TRACKING_ERROR_M = 20.0
 
 
 class Coordinator:
@@ -105,10 +107,12 @@ class Coordinator:
             )
 
             # 2. Sync quantised grid positions from telemetry before building state.
-            self.world.agent_grids = [
+            actual_grids = [
                 self.world.get_grid_pos(telem.north_m, telem.east_m)
                 for telem in telems
             ]
+            self._validate_telemetry_positions(actual_grids)
+            self.world.agent_grids = actual_grids
             self._record_positions()
 
             # 3. Build per-agent state vectors
@@ -255,6 +259,22 @@ class Coordinator:
         }
         logger.info("Episode %d complete: %s", episode, summary)
         return summary
+
+    def _validate_telemetry_positions(
+        self,
+        actual_grids: list[tuple[int, int]],
+    ) -> None:
+        """Fail fast on telemetry jumps large enough to invalidate world-state sync."""
+        for i, actual in enumerate(actual_grids):
+            expected = tuple(self.world.agent_grids[i])
+            jump_cells = abs(actual[0] - expected[0]) + abs(actual[1] - expected[1])
+            tracking_error_m = jump_cells * self.world.meters_per_cell
+            if jump_cells > _MAX_TELEMETRY_STEP_JUMP_CELLS or tracking_error_m > _MAX_TRACKING_ERROR_M:
+                raise RuntimeError(
+                    "Telemetry jump too large for safe SITL/world sync: "
+                    f"drone={i} expected_grid={expected} actual_grid={actual} "
+                    f"jump_cells={jump_cells} tracking_error_m={tracking_error_m:.1f}"
+                )
 
     async def _wait_for_start_positions(
         self,
