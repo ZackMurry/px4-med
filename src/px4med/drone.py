@@ -20,6 +20,7 @@ BASE_XY_CRUISE_M_S = 5.0
 BASE_XY_VEL_MAX_M_S = 12.0
 BASE_Z_VEL_UP_M_S = 3.0
 BASE_Z_VEL_DOWN_M_S = 1.5
+DEFAULT_SIM_BAT_DRAIN = 180.0
 
 
 @dataclass
@@ -126,6 +127,60 @@ class Drone:
             xy_max,
             z_up,
             z_down,
+        )
+
+    async def configure_battery_profile(self, drain_rate: float = DEFAULT_SIM_BAT_DRAIN) -> None:
+        """Configure PX4 SITL battery parameters for longer experimental runs."""
+        assert self._system is not None, "call connect() first"
+        if drain_rate < 0.0:
+            raise ValueError("drain_rate must be non-negative")
+
+        async def _set_int(name: str, value: int) -> None:
+            await self._system.param.set_param_int(name, value)
+            logger.info("Drone %d: param %s=%d", self.drone_id, name, value)
+
+        async def _set_float(name: str, value: float) -> None:
+            await self._system.param.set_param_float(name, value)
+            logger.info("Drone %d: param %s=%.2f", self.drone_id, name, value)
+
+        async def _set_float_verified(name: str, value: float, attempts: int = 3) -> None:
+            for attempt in range(1, attempts + 1):
+                await _set_float(name, value)
+                actual = await self._system.param.get_param_float(name)
+                if abs(actual - value) <= 1e-6:
+                    logger.info(
+                        "Drone %d: verified param %s=%.2f",
+                        self.drone_id,
+                        name,
+                        actual,
+                    )
+                    return
+                logger.warning(
+                    "Drone %d: param verify mismatch for %s expected=%.2f actual=%.2f attempt=%d/%d",
+                    self.drone_id,
+                    name,
+                    value,
+                    actual,
+                    attempt,
+                    attempts,
+                )
+                await asyncio.sleep(0.2)
+            raise RuntimeError(
+                f"Drone {self.drone_id}: failed to verify PX4 param {name}={value}"
+            )
+
+        sim_bat_min_pct = 100.0 if drain_rate <= 0.0 else 0.2
+        await _set_int("COM_LOW_BAT_ACT", 0)
+        await _set_float("COM_ARM_BAT_MIN", 0.0)
+        await _set_int("COM_ARM_WO_GPS", 2)
+        await _set_int("CBRK_SUPPLY_CHK", 894281)
+        await _set_float("SIM_BAT_MIN_PCT", sim_bat_min_pct)
+        await _set_float_verified("SIM_BAT_DRAIN", drain_rate)
+        logger.info(
+            "Drone %d: battery profile drain_rate=%.2f sim_bat_min_pct=%.2f",
+            self.drone_id,
+            drain_rate,
+            sim_bat_min_pct,
         )
 
     async def takeoff(self, altitude_m: float = 5.0) -> None:

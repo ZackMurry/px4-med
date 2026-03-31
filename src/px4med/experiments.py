@@ -286,6 +286,12 @@ def main() -> None:
         default=3.0,
         help="For --backend sitl, scale PX4 cruise/max horizontal and vertical speeds",
     )
+    parser.add_argument(
+        "--battery-drain-rate",
+        type=float,
+        default=180.0,
+        help="For --backend sitl, PX4 SIM_BAT_DRAIN value. Higher lasts longer in this setup.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -353,6 +359,7 @@ def main() -> None:
                 step_hz=args.step_hz,
                 grpc_base_port=args.grpc_base_port,
                 speed_factor=args.speed_factor,
+                battery_drain_rate=args.battery_drain_rate,
                 log_dir=args.output_dir / "sitl_logs",
             )
         )
@@ -655,6 +662,7 @@ async def run_sitl_experiments(
     step_hz: float,
     grpc_base_port: int,
     speed_factor: float,
+    battery_drain_rate: float,
     log_dir: Path,
 ) -> tuple[list[EpisodeResult], list[StepResult]]:
     dm: DockerManager | None = None
@@ -682,6 +690,12 @@ async def run_sitl_experiments(
         logger.info("Connecting to %d drone(s) for SITL backend ...", len(drones))
         for drone in drones:
             await drone.connect()
+        logger.info(
+            "Applying PX4 battery drain rate %.2f for SITL experiments ...",
+            battery_drain_rate,
+        )
+        for drone in drones:
+            await drone.configure_battery_profile(battery_drain_rate)
         if speed_factor != 1.0:
             logger.info("Applying PX4 speed factor %.2f for SITL experiments ...", speed_factor)
         for drone in drones:

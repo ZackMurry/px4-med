@@ -48,6 +48,10 @@ async def _async_main() -> None:
         "--speed-factor", type=float, default=3.0,
         help="Scale PX4 cruise/max horizontal and vertical speed limits (default: 3.0)",
     )
+    parser.add_argument(
+        "--battery-drain-rate", type=float, default=180.0,
+        help="PX4 SIM_BAT_DRAIN value for SITL battery simulation (default: 180.0)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -104,6 +108,9 @@ async def _async_main() -> None:
         for d in drones:
             await d.connect()
         logger.info("All drones connected.")
+        logger.info("Applying PX4 battery drain rate %.2f ...", args.battery_drain_rate)
+        for d in drones:
+            await d.configure_battery_profile(args.battery_drain_rate)
         if args.speed_factor != 1.0:
             logger.info("Applying PX4 speed factor %.2f ...", args.speed_factor)
         for d in drones:
