@@ -8,6 +8,7 @@ Follows the same pattern as runner.py:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import subprocess
@@ -29,6 +30,14 @@ _MAVSDK_ADDRESSES = [
 ]
 
 
+@dataclass(frozen=True)
+class CustomBattery:
+    capacity_mah: int = 5000
+    n_cells: int = 4
+    v_charged: float = 4.20
+    v_empty: float = 3.50
+
+
 class SimulationError(RuntimeError):
     pass
 
@@ -40,10 +49,12 @@ class DockerManager:
         self,
         image: str = DOCKER_IMAGE,
         log_dir: Optional[Path] = None,
+        battery: CustomBattery = CustomBattery(),
     ) -> None:
         self.image = image
         base_log_dir = Path(log_dir) if log_dir else Path(__file__).parents[3] / "logs"
         self.log_dir = base_log_dir.expanduser().resolve()
+        self.battery = battery
         self.container_id: Optional[str] = None
 
     @property
@@ -71,11 +82,22 @@ class DockerManager:
             "-e", "NUM_DRONES=2",
             "-e", "PX4_BASE_INSTANCE=0",
             "-e", "DRONE_MODEL=gz_x500",
+            "-e", f"PX4_PARAM_BAT1_CAPACITY={float(self.battery.capacity_mah)}",
+            "-e", f"PX4_PARAM_BAT1_N_CELLS={int(self.battery.n_cells)}",
+            "-e", f"PX4_PARAM_BAT1_V_CHARGED={float(self.battery.v_charged)}",
+            "-e", f"PX4_PARAM_BAT1_V_EMPTY={float(self.battery.v_empty)}",
             self.image,
             "bash", "-lc", f"bash {_CONTAINER_SCRIPT}",
         ]
 
-        logger.info("Starting PX4 SITL container (image=%s) ...", self.image)
+        logger.info(
+            "Starting PX4 SITL container (image=%s, battery=%dmAh %dS %.2f->%.2fV) ...",
+            self.image,
+            self.battery.capacity_mah,
+            self.battery.n_cells,
+            self.battery.v_charged,
+            self.battery.v_empty,
+        )
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise SimulationError(

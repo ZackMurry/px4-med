@@ -378,15 +378,15 @@ def main() -> None:
     for suite in suites:
         suite_rows = [row for row in summaries if row["suite"] == suite.name]
         suite_summary_csv = args.output_dir / "tables" / f"{suite.name}_summary.csv"
-        suite_figure = args.output_dir / "figures" / f"{suite.name}.png"
+        suite_figure_dir = args.output_dir / "figures" / suite.name
         write_summary_csv(suite_summary_csv, suite_rows)
         plot_suite(
             suite,
             suite_rows,
-            suite_figure,
+            suite_figure_dir,
         )
         logger.info("Wrote suite summary: %s", suite_summary_csv)
-        logger.info("Wrote suite figure: %s", suite_figure)
+        logger.info("Wrote suite figures: %s", suite_figure_dir)
 
     plot_episode_details(
         step_results=step_results,
@@ -1337,10 +1337,8 @@ def summarize_results(results: list[EpisodeResult]) -> list[dict[str, Any]]:
     return summaries
 
 
-def plot_suite(suite: SuiteDef, summaries: list[dict[str, Any]], output_path: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    fig.suptitle(suite.title)
-    axes_flat = list(axes.flatten())
+def plot_suite(suite: SuiteDef, summaries: list[dict[str, Any]], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if suite.plot_kind == "policy_bar":
         scenario_name = suite.scenarios[0].name
@@ -1348,21 +1346,37 @@ def plot_suite(suite: SuiteDef, summaries: list[dict[str, Any]], output_path: Pa
         order = {policy: idx for idx, policy in enumerate(suite.policies)}
         suite_rows.sort(key=lambda row: order[row["policy"]])
 
-        for ax, (metric, title) in zip(axes_flat, PLOT_METRICS):
+        for metric, title in PLOT_METRICS:
+            fig, ax = plt.subplots(figsize=(6, 4.5))
             xs = range(len(suite_rows))
             means = [row[f"{metric}_mean"] for row in suite_rows]
             cis = [row[f"{metric}_ci95"] for row in suite_rows]
             colors = [COLORS.get(row["policy"], "#4c4c4c") for row in suite_rows]
             ax.bar(xs, means, yerr=cis, color=colors, capsize=4)
             ax.set_xticks(list(xs), [row["policy"] for row in suite_rows], rotation=20)
-            ax.set_title(title)
+            ax.set_title(f"{suite.title} | {title}")
             ax.set_ylabel(METRIC_LABELS[metric])
             ax.grid(axis="y", alpha=0.25)
+            figure_path = output_dir / f"{suite.name}_{_metric_slug(metric)}.png"
+            _save_figure(fig, figure_path)
+            _save_figure_csv(
+                figure_path,
+                [
+                    {
+                        "policy": row["policy"],
+                        "mean": row[f"{metric}_mean"],
+                        "ci95": row[f"{metric}_ci95"],
+                    }
+                    for row in suite_rows
+                ],
+            )
 
     elif suite.plot_kind == "scenario_line":
         x_order = {scenario.name: scenario.x_value for scenario in suite.scenarios}
         label_order = {scenario.name: scenario.label for scenario in suite.scenarios}
-        for ax, (metric, title) in zip(axes_flat, PLOT_METRICS):
+        for metric, title in PLOT_METRICS:
+            fig, ax = plt.subplots(figsize=(6.5, 4.5))
+            csv_rows: list[dict[str, Any]] = []
             for policy in suite.policies:
                 rows = [row for row in summaries if row["policy"] == policy]
                 rows.sort(key=lambda row: x_order[row["scenario"]])
@@ -1373,7 +1387,17 @@ def plot_suite(suite: SuiteDef, summaries: list[dict[str, Any]], output_path: Pa
                 lower = [mean - ci for mean, ci in zip(means, cis)]
                 upper = [mean + ci for mean, ci in zip(means, cis)]
                 ax.fill_between(xs, lower, upper, alpha=0.15, color=COLORS.get(policy))
-            ax.set_title(title)
+                csv_rows.extend(
+                    {
+                        "policy": policy,
+                        "x_value": x_order[row["scenario"]],
+                        "x_label": label_order[row["scenario"]],
+                        "mean": row[f"{metric}_mean"],
+                        "ci95": row[f"{metric}_ci95"],
+                    }
+                    for row in rows
+                )
+            ax.set_title(f"{suite.title} | {title}")
             ax.set_xlabel(suite.x_label)
             ax.set_ylabel(METRIC_LABELS[metric])
             ax.grid(alpha=0.25)
@@ -1381,13 +1405,12 @@ def plot_suite(suite: SuiteDef, summaries: list[dict[str, Any]], output_path: Pa
                 [scenario.x_value for scenario in suite.scenarios],
                 [label_order[scenario.name] for scenario in suite.scenarios],
             )
-        axes_flat[0].legend()
+            ax.legend()
+            figure_path = output_dir / f"{suite.name}_{_metric_slug(metric)}.png"
+            _save_figure(fig, figure_path)
+            _save_figure_csv(figure_path, csv_rows)
     else:
         raise ValueError(f"Unknown plot kind: {suite.plot_kind}")
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
 
 
 def plot_episode_details(
@@ -1419,7 +1442,7 @@ def plot_episode_details(
         _plot_episode_progress(
             rows,
             episode,
-            output_dir / f"{stem}_progress.png",
+            output_dir / stem,
         )
         _plot_episode_trajectories(
             rows,
@@ -1428,14 +1451,14 @@ def plot_episode_details(
         _plot_episode_tracking(
             rows,
             episode,
-            output_dir / f"{stem}_tracking.png",
+            output_dir / stem,
         )
 
 
 def _plot_episode_progress(
     rows: list[StepResult],
     episode: EpisodeResult,
-    output_path: Path,
+    output_base: Path,
 ) -> None:
     steps = [row.step + 1 for row in rows]
     cumulative_deliveries = []
@@ -1464,68 +1487,137 @@ def _plot_episode_progress(
         cumulative_collisions.append(collision_so_far)
 
     delivery_steps = [row.step + 1 for row in rows if row.deliveries]
-    fig, axes = plt.subplots(3, 2, figsize=(12, 10))
-    fig.suptitle(
+    title_prefix = (
         f"{episode.backend} | {episode.suite} | {episode.scenario} | {episode.policy} | ep {episode.episode}"
     )
 
-    axes[0, 0].plot(steps, cumulative_deliveries, color="#1b4965")
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(steps, cumulative_deliveries, color="#1b4965")
     for delivery_step in delivery_steps:
-        axes[0, 0].axvline(delivery_step, color="#1b4965", alpha=0.15, linewidth=1)
-    axes[0, 0].set_title("Cumulative Deliveries")
-    axes[0, 0].set_xlabel("Step")
-    axes[0, 0].set_ylabel("Deliveries")
-    axes[0, 0].grid(alpha=0.25)
-
-    axes[0, 1].plot(steps, remaining_patients, color="#9c6644")
-    axes[0, 1].set_title("Remaining Patients")
-    axes[0, 1].set_xlabel("Step")
-    axes[0, 1].set_ylabel("Remaining")
-    axes[0, 1].grid(alpha=0.25)
-
-    axes[1, 0].plot(steps, cumulative_reward, color="#4c956c")
-    axes[1, 0].set_title("Cumulative Reward")
-    axes[1, 0].set_xlabel("Step")
-    axes[1, 0].set_ylabel("Reward")
-    axes[1, 0].grid(alpha=0.25)
-
-    axes[1, 1].plot(steps, [row.drone0_battery for row in rows], label="drone0", color="#c1121f")
-    axes[1, 1].plot(steps, [row.drone1_battery for row in rows], label="drone1", color="#1d4ed8")
-    axes[1, 1].set_title("Battery Margin")
-    axes[1, 1].set_xlabel("Step")
-    axes[1, 1].set_ylabel("Battery")
-    axes[1, 1].grid(alpha=0.25)
-    axes[1, 1].legend()
-
-    axes[2, 0].plot(steps, [row.target_distance_0 for row in rows], label="drone0", color="#c1121f")
-    axes[2, 0].plot(steps, [row.target_distance_1 for row in rows], label="drone1", color="#1d4ed8")
-    axes[2, 0].set_title("Distance to Current Goal")
-    axes[2, 0].set_xlabel("Step")
-    axes[2, 0].set_ylabel("Grid distance")
-    axes[2, 0].grid(alpha=0.25)
-    axes[2, 0].legend()
-
-    axes[2, 1].plot(steps, cumulative_hazard_entries, label="hazard entries", color="#d17b0f")
-    axes[2, 1].plot(steps, cumulative_collisions, label="collisions", color="#6b7280")
-    axes[2, 1].set_title("Risk Events")
-    axes[2, 1].set_xlabel("Step")
-    axes[2, 1].set_ylabel("Cumulative count")
-    axes[2, 1].grid(alpha=0.25)
-    axes[2, 1].legend()
-
-    summary_text = (
-        f"delivered={episode.patients_delivered}/{episode.patients_spawned}  "
-        f"died={episode.patients_died}  "
-        f"triage={episode.triage_efficiency:.2f}  "
-        f"reward={episode.total_reward:.1f}  "
-        f"steps={episode.steps}  "
-        f"battery_min={episode.battery_margin_min:.1f}"
+        ax.axvline(delivery_step, color="#1b4965", alpha=0.15, linewidth=1)
+    ax.set_title(f"{title_prefix} | Cumulative Deliveries")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Deliveries")
+    ax.grid(alpha=0.25)
+    delivery_path = output_base.parent / f"{output_base.name}_cumulative_deliveries.png"
+    _save_figure(fig, delivery_path)
+    _save_figure_csv(
+        delivery_path,
+        [
+            {
+                "step": step,
+                "cumulative_deliveries": total,
+                "delivery_event": step in delivery_steps,
+            }
+            for step, total in zip(steps, cumulative_deliveries)
+        ],
     )
-    fig.text(0.5, 0.01, summary_text, ha="center", fontsize=10)
 
-    fig.tight_layout(rect=(0, 0.03, 1, 0.97))
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(steps, remaining_patients, color="#9c6644")
+    ax.set_title(f"{title_prefix} | Remaining Patients")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Remaining")
+    ax.grid(alpha=0.25)
+    remaining_path = output_base.parent / f"{output_base.name}_remaining_patients.png"
+    _save_figure(fig, remaining_path)
+    _save_figure_csv(
+        remaining_path,
+        [
+            {"step": step, "remaining_patients": remaining}
+            for step, remaining in zip(steps, remaining_patients)
+        ],
+    )
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(steps, cumulative_reward, color="#4c956c")
+    ax.set_title(f"{title_prefix} | Cumulative Reward")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Reward")
+    ax.grid(alpha=0.25)
+    reward_path = output_base.parent / f"{output_base.name}_cumulative_reward.png"
+    _save_figure(fig, reward_path)
+    _save_figure_csv(
+        reward_path,
+        [
+            {"step": step, "cumulative_reward": reward}
+            for step, reward in zip(steps, cumulative_reward)
+        ],
+    )
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    drone0_battery = [row.drone0_battery for row in rows]
+    drone1_battery = [row.drone1_battery for row in rows]
+    ax.plot(steps, drone0_battery, label="drone0", color="#c1121f")
+    ax.plot(steps, drone1_battery, label="drone1", color="#1d4ed8")
+    ax.set_title(f"{title_prefix} | Battery Margin")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Battery")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    battery_path = output_base.parent / f"{output_base.name}_battery_margin.png"
+    _save_figure(fig, battery_path)
+    _save_figure_csv(
+        battery_path,
+        [
+            {
+                "step": step,
+                "drone0_battery": battery0,
+                "drone1_battery": battery1,
+            }
+            for step, battery0, battery1 in zip(steps, drone0_battery, drone1_battery)
+        ],
+    )
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    target_distance_0 = [row.target_distance_0 for row in rows]
+    target_distance_1 = [row.target_distance_1 for row in rows]
+    ax.plot(steps, target_distance_0, label="drone0", color="#c1121f")
+    ax.plot(steps, target_distance_1, label="drone1", color="#1d4ed8")
+    ax.set_title(f"{title_prefix} | Distance to Current Goal")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Grid distance")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    distance_path = output_base.parent / f"{output_base.name}_distance_to_goal.png"
+    _save_figure(fig, distance_path)
+    _save_figure_csv(
+        distance_path,
+        [
+            {
+                "step": step,
+                "drone0_distance": distance0,
+                "drone1_distance": distance1,
+            }
+            for step, distance0, distance1 in zip(steps, target_distance_0, target_distance_1)
+        ],
+    )
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(steps, cumulative_hazard_entries, label="hazard_entries", color="#d17b0f")
+    ax.plot(steps, cumulative_collisions, label="collisions", color="#6b7280")
+    ax.set_title(f"{title_prefix} | Risk Events")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Cumulative count")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    risk_path = output_base.parent / f"{output_base.name}_risk_events.png"
+    _save_figure(fig, risk_path)
+    _save_figure_csv(
+        risk_path,
+        [
+            {
+                "step": step,
+                "hazard_entries": hazards,
+                "collisions": collisions,
+            }
+            for step, hazards, collisions in zip(
+                steps,
+                cumulative_hazard_entries,
+                cumulative_collisions,
+            )
+        ],
+    )
 
 
 def _plot_episode_trajectories(rows: list[StepResult], output_path: Path) -> None:
@@ -1547,67 +1639,112 @@ def _plot_episode_trajectories(rows: list[StepResult], output_path: Path) -> Non
     ax.invert_yaxis()
     ax.legend()
 
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
+    _save_figure(fig, output_path)
+    _save_figure_csv(
+        output_path,
+        [
+            {
+                "step": row.step + 1,
+                "drone0_x": row.sim_pos0_x,
+                "drone0_y": row.sim_pos0_y,
+                "drone1_x": row.sim_pos1_x,
+                "drone1_y": row.sim_pos1_y,
+            }
+            for row in rows
+        ],
+    )
 
 
 def _plot_episode_tracking(
     rows: list[StepResult],
     episode: EpisodeResult,
-    output_path: Path,
+    output_base: Path,
 ) -> None:
     steps = [row.step + 1 for row in rows]
     sim0_east = [row.sim_pos0_x * METERS_PER_CELL for row in rows]
     sim0_north = [-row.sim_pos0_y * METERS_PER_CELL for row in rows]
     sim1_east = [row.sim_pos1_x * METERS_PER_CELL for row in rows]
     sim1_north = [-row.sim_pos1_y * METERS_PER_CELL for row in rows]
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(
+    title_prefix = (
         f"PX4 Tracking Detail | {episode.suite} | {episode.scenario} | {episode.policy} | ep {episode.episode}"
     )
 
-    axes[0].plot(sim0_east, sim0_north, color="#fca5a5", linewidth=2, label="drone0 simulated")
-    axes[0].plot(
+    fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    ax.plot(sim0_east, sim0_north, color="#fca5a5", linewidth=2, label="drone0 simulated")
+    ax.plot(
         [row.drone0_east for row in rows],
         [row.drone0_north for row in rows],
         color="#c1121f",
         linewidth=1.5,
         label="drone0 actual",
     )
-    axes[0].plot(sim1_east, sim1_north, color="#93c5fd", linewidth=2, label="drone1 simulated")
-    axes[0].plot(
+    ax.plot(sim1_east, sim1_north, color="#93c5fd", linewidth=2, label="drone1 simulated")
+    ax.plot(
         [row.drone1_east for row in rows],
         [row.drone1_north for row in rows],
         color="#1d4ed8",
         linewidth=1.5,
         label="drone1 actual",
     )
-    axes[0].set_title("Actual vs Sim Trajectory")
-    axes[0].set_xlabel("East (m)")
-    axes[0].set_ylabel("North (m)")
-    axes[0].axis("equal")
-    axes[0].grid(alpha=0.25)
-    axes[0].legend()
-
-    axes[1].plot(steps, [row.tracking_error_m_0 for row in rows], color="#c1121f", label="drone0")
-    axes[1].plot(steps, [row.tracking_error_m_1 for row in rows], color="#1d4ed8", label="drone1")
-    axes[1].set_title("Tracking Error to Simulated Grid State")
-    axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("Position error (m)")
-    axes[1].grid(alpha=0.25)
-    axes[1].legend()
-
-    summary_text = (
-        f"mean err={episode.mean_tracking_error_m:.2f} m  "
-        f"max err={episode.max_tracking_error_m:.2f} m"
+    ax.set_title(f"{title_prefix} | Actual vs Sim Trajectory")
+    ax.set_xlabel("East (m)")
+    ax.set_ylabel("North (m)")
+    ax.axis("equal")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    tracking_path = output_base.parent / f"{output_base.name}_actual_vs_sim_trajectory.png"
+    _save_figure(fig, tracking_path)
+    _save_figure_csv(
+        tracking_path,
+        [
+            {
+                "step": step,
+                "drone0_sim_east": d0_sim_e,
+                "drone0_sim_north": d0_sim_n,
+                "drone0_actual_east": row.drone0_east,
+                "drone0_actual_north": row.drone0_north,
+                "drone1_sim_east": d1_sim_e,
+                "drone1_sim_north": d1_sim_n,
+                "drone1_actual_east": row.drone1_east,
+                "drone1_actual_north": row.drone1_north,
+            }
+            for step, row, d0_sim_e, d0_sim_n, d1_sim_e, d1_sim_n in zip(
+                steps,
+                rows,
+                sim0_east,
+                sim0_north,
+                sim1_east,
+                sim1_north,
+            )
+        ],
     )
-    fig.text(0.5, 0.02, summary_text, ha="center", fontsize=10)
 
-    fig.tight_layout(rect=(0, 0.05, 1, 0.95))
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    tracking_error_0 = [row.tracking_error_m_0 for row in rows]
+    tracking_error_1 = [row.tracking_error_m_1 for row in rows]
+    ax.plot(steps, tracking_error_0, color="#c1121f", label="drone0")
+    ax.plot(steps, tracking_error_1, color="#1d4ed8", label="drone1")
+    ax.set_title(
+        f"{title_prefix} | Tracking Error to Simulated Grid State "
+        f"(mean={episode.mean_tracking_error_m:.2f}m, max={episode.max_tracking_error_m:.2f}m)"
+    )
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Position error (m)")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    error_path = output_base.parent / f"{output_base.name}_tracking_error.png"
+    _save_figure(fig, error_path)
+    _save_figure_csv(
+        error_path,
+        [
+            {
+                "step": step,
+                "drone0_tracking_error_m": error0,
+                "drone1_tracking_error_m": error1,
+            }
+            for step, error0, error1 in zip(steps, tracking_error_0, tracking_error_1)
+        ],
+    )
 
 
 def write_episode_csv(path: Path, results: list[EpisodeResult]) -> None:
@@ -1627,10 +1764,26 @@ def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _metric_slug(metric: str) -> str:
+    return metric.replace("_rate", "").replace("_", "-")
+
+
+def _save_figure(fig: Any, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def _save_figure_csv(output_path: Path, rows: list[dict[str, Any]]) -> None:
+    write_csv(output_path.with_suffix(".csv"), rows)
 
 
 def ci95(values: list[float]) -> float:

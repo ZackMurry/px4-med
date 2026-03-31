@@ -20,7 +20,8 @@ BASE_XY_CRUISE_M_S = 5.0
 BASE_XY_VEL_MAX_M_S = 12.0
 BASE_Z_VEL_UP_M_S = 3.0
 BASE_Z_VEL_DOWN_M_S = 1.5
-DEFAULT_SIM_BAT_DRAIN = 180.0
+DEFAULT_SIM_BAT_DRAIN = 5000.0
+PX4_SIM_BAT_MIN_PCT = 10.0
 
 
 @dataclass
@@ -169,7 +170,7 @@ class Drone:
                 f"Drone {self.drone_id}: failed to verify PX4 param {name}={value}"
             )
 
-        sim_bat_min_pct = 100.0 if drain_rate <= 0.0 else 0.2
+        sim_bat_min_pct = 100.0 if drain_rate <= 0.0 else PX4_SIM_BAT_MIN_PCT
         await _set_int("COM_LOW_BAT_ACT", 0)
         await _set_float("COM_ARM_BAT_MIN", 0.0)
         await _set_int("COM_ARM_WO_GPS", 2)
