@@ -22,6 +22,9 @@ BASE_Z_VEL_UP_M_S = 3.0
 BASE_Z_VEL_DOWN_M_S = 1.5
 DEFAULT_SIM_BAT_DRAIN = 5000.0
 PX4_SIM_BAT_MIN_PCT = 10.0
+TELEMETRY_TIMEOUT_S = 10.0
+IN_AIR_TIMEOUT_S = 30.0
+LAND_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -95,6 +98,24 @@ class Drone:
             raise TimeoutError(
                 f"Drone {self.drone_id}: no local position estimate after {timeout:.0f}s"
             )
+
+    async def _next_stream_value(
+        self,
+        stream,
+        *,
+        timeout: float,
+        label: str,
+    ):
+        """Return the next item from a MAVSDK async stream with a timeout."""
+        try:
+            async with asyncio.timeout(timeout):
+                async for item in stream:
+                    return item
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Drone {self.drone_id}: timed out waiting for {label} after {timeout:.0f}s"
+            ) from exc
+        raise RuntimeError(f"Drone {self.drone_id}: {label} stream closed unexpectedly")
 
     async def arm(self) -> None:
         assert self._system is not None, "call connect() first"
@@ -189,10 +210,15 @@ class Drone:
         assert self._system is not None
         await self._system.action.set_takeoff_altitude(altitude_m)
         await self._system.action.takeoff()
-        async for in_air in self._system.telemetry.in_air():
+        while True:
+            in_air = await self._next_stream_value(
+                self._system.telemetry.in_air(),
+                timeout=IN_AIR_TIMEOUT_S,
+                label="in-air state",
+            )
             if in_air:
                 logger.info("Drone %d: airborne at %.1f m AGL", self.drone_id, altitude_m)
-                break
+                return
 
     # ------------------------------------------------------------------
     # Control
@@ -236,7 +262,12 @@ class Drone:
         # Busy-wait for arrival or step timeout
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
-        async for pos_vel in self._system.telemetry.position_velocity_ned():
+        while True:
+            pos_vel = await self._next_stream_value(
+                self._system.telemetry.position_velocity_ned(),
+                timeout=min(TELEMETRY_TIMEOUT_S, timeout_s),
+                label="position telemetry",
+            )
             p = pos_vel.position
             dist = math.sqrt(
                 (p.north_m - north_m) ** 2
@@ -260,10 +291,20 @@ class Drone:
         logger.info("Drone %d: landing commanded", self.drone_id)
 
         from mavsdk.telemetry import LandedState
-        async for state in self._system.telemetry.landed_state():
+        deadline = asyncio.get_running_loop().time() + LAND_TIMEOUT_S
+        while True:
+            state = await self._next_stream_value(
+                self._system.telemetry.landed_state(),
+                timeout=TELEMETRY_TIMEOUT_S,
+                label="landed state",
+            )
             if state == LandedState.ON_GROUND:
                 logger.info("Drone %d: on the ground", self.drone_id)
-                break
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError(
+                    f"Drone {self.drone_id}: landing did not complete after {LAND_TIMEOUT_S:.0f}s"
+                )
 
     # ------------------------------------------------------------------
     # Telemetry
@@ -274,19 +315,28 @@ class Drone:
         assert self._system is not None
 
         # Read next value from each telemetry stream independently
-        async for pos_vel in self._system.telemetry.position_velocity_ned():
-            pos = pos_vel.position
-            break
+        pos_vel = await self._next_stream_value(
+            self._system.telemetry.position_velocity_ned(),
+            timeout=TELEMETRY_TIMEOUT_S,
+            label="position telemetry",
+        )
+        pos = pos_vel.position
 
-        async for bat in self._system.telemetry.battery():
-            # MAVSDK v3.x returns remaining_percent as 0–100 (not 0–1)
-            battery_pct = bat.remaining_percent
-            break
+        bat = await self._next_stream_value(
+            self._system.telemetry.battery(),
+            timeout=TELEMETRY_TIMEOUT_S,
+            label="battery telemetry",
+        )
+        # MAVSDK v3.x returns remaining_percent as 0–100 (not 0–1)
+        battery_pct = bat.remaining_percent
 
         from mavsdk.telemetry import LandedState
-        async for state in self._system.telemetry.landed_state():
-            is_landed = state == LandedState.ON_GROUND
-            break
+        state = await self._next_stream_value(
+            self._system.telemetry.landed_state(),
+            timeout=TELEMETRY_TIMEOUT_S,
+            label="landed state",
+        )
+        is_landed = state == LandedState.ON_GROUND
 
         return Telemetry(
             north_m=pos.north_m,
