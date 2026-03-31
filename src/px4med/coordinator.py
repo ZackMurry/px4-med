@@ -59,13 +59,20 @@ class Coordinator:
         self.enable_cycle_breaking = enable_cycle_breaking
         self._position_history = [deque(maxlen=8), deque(maxlen=8)]
 
+    def _write_phase_status(self, note: str) -> None:
+        write_status = getattr(self.metrics, "write_status", None)
+        if callable(write_status):
+            write_status(status="running", note=note)
+
     async def run_episode(self, episode: int = 0, max_steps: int = 800) -> dict:
         """Arm, take off, run RL loop, land all. Return summary dict."""
         self.world.reset()
         self._position_history = [deque(maxlen=8), deque(maxlen=8)]
 
         # Arm and take off both drones concurrently
+        self._write_phase_status("coordinator: arming drones")
         await asyncio.gather(*(d.arm() for d in self.drones))
+        self._write_phase_status("coordinator: takeoff")
         await asyncio.gather(*(d.takeoff() for d in self.drones))
 
         # Reposition to training-env start positions before the RL loop.
@@ -74,6 +81,7 @@ class Coordinator:
         mpc = float(self.world.config.get("grid", {}).get("meters_per_cell", 2.0))
         start_grids = self.world.config.get("agent_start_positions", _DEFAULT_START_GRIDS)
         logger.info("Repositioning drones to training start positions: %s", start_grids)
+        self._write_phase_status("coordinator: repositioning to start grids")
         await asyncio.gather(*(
             self.drones[i].send_waypoint(
                 -start_grids[i][1] * mpc,   # north = -grid_y * mpc
@@ -83,6 +91,7 @@ class Coordinator:
             )
             for i in range(len(self.drones))
         ))
+        self._write_phase_status("coordinator: waiting for start-grid settle")
         await self._wait_for_start_positions(start_grids)
 
         landed = [False, False]
@@ -102,6 +111,8 @@ class Coordinator:
             step_start = loop.time()
 
             # 1. Gather telemetry
+            if step == 0:
+                self._write_phase_status("coordinator: first telemetry sample")
             telems: list[Telemetry] = list(
                 await asyncio.gather(*(d.get_telemetry() for d in self.drones))
             )
@@ -268,7 +279,10 @@ class Coordinator:
         for i, actual in enumerate(actual_grids):
             expected = tuple(self.world.agent_grids[i])
             jump_cells = abs(actual[0] - expected[0]) + abs(actual[1] - expected[1])
-            tracking_error_m = jump_cells * self.world.meters_per_cell
+            tracking_error_m = (
+                jump_cells
+                * float(self.world.config.get("grid", {}).get("meters_per_cell", 2.0))
+            )
             if jump_cells > _MAX_TELEMETRY_STEP_JUMP_CELLS or tracking_error_m > _MAX_TRACKING_ERROR_M:
                 raise RuntimeError(
                     "Telemetry jump too large for safe SITL/world sync: "

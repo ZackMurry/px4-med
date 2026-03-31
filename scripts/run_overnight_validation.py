@@ -397,7 +397,7 @@ def run_worker(args: argparse.Namespace) -> int:
                 action_delay_steps=scenario.action_delay_steps,
                 enable_cycle_breaking=False,
             )
-            metrics.write_status(status="running", note="episode started")
+            metrics.write_status(status="running", note="episode initialized")
             summary = await coordinator.run_episode(
                 episode=args.episode,
                 max_steps=scenario.max_steps,
@@ -455,6 +455,7 @@ def run_worker(args: argparse.Namespace) -> int:
             )
             return result
         finally:
+            metrics.write_status(status="running", note="worker cleanup landing drones")
             for drone in drones:
                 try:
                     await drone.land()
@@ -542,7 +543,7 @@ def monitor_attempt(
                 }
             else:
                 logger.info(
-                    "Job %s attempt %d running %.1fm status=%s step=%s deliveries=%s remaining=%s battery=%s",
+                    "Job %s attempt %d running %.1fm status=%s step=%s deliveries=%s remaining=%s battery=%s note=%s error=%s",
                     job.job_id,
                     attempt,
                     (now - start) / 60.0,
@@ -551,6 +552,8 @@ def monitor_attempt(
                     last_heartbeat.get("deliveries_so_far"),
                     last_heartbeat.get("remaining_patients"),
                     last_heartbeat.get("last_known_battery"),
+                    last_heartbeat.get("note"),
+                    last_heartbeat.get("last_error"),
                 )
                 live = {
                     "job_id": job.job_id,
