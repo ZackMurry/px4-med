@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Arrival tolerance for send_waypoint() busy-wait (metres)
 WAYPOINT_ARRIVAL_RADIUS_M = 2.0
 # How long to wait for drone to reach a waypoint before moving on (seconds)
-WAYPOINT_TIMEOUT_S = 1.5
+WAYPOINT_TIMEOUT_S = 2.0
 BASE_XY_CRUISE_M_S = 5.0
 BASE_XY_VEL_MAX_M_S = 12.0
 BASE_Z_VEL_UP_M_S = 3.0
@@ -184,7 +184,7 @@ class Drone:
             sim_bat_min_pct,
         )
 
-    async def takeoff(self, altitude_m: float = 5.0) -> None:
+    async def takeoff(self, altitude_m: float = 20.0) -> None:
         """Command auto-takeoff and wait until the drone is airborne."""
         assert self._system is not None
         await self._system.action.set_takeoff_altitude(altitude_m)
@@ -198,7 +198,15 @@ class Drone:
     # Control
     # ------------------------------------------------------------------
 
-    async def send_waypoint(self, north_m: float, east_m: float, down_m: float) -> None:
+    async def send_waypoint(
+        self,
+        north_m: float,
+        east_m: float,
+        down_m: float,
+        *,
+        arrival_radius_m: float = WAYPOINT_ARRIVAL_RADIUS_M,
+        timeout_s: float = WAYPOINT_TIMEOUT_S,
+    ) -> None:
         """Send an absolute NED position setpoint via offboard mode.
 
         On the first call, starts offboard mode from the drone's current position
@@ -227,7 +235,7 @@ class Drone:
 
         # Busy-wait for arrival or step timeout
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + WAYPOINT_TIMEOUT_S
+        deadline = loop.time() + timeout_s
         async for pos_vel in self._system.telemetry.position_velocity_ned():
             p = pos_vel.position
             dist = math.sqrt(
@@ -235,7 +243,7 @@ class Drone:
                 + (p.east_m - east_m) ** 2
                 + (p.down_m - down_m) ** 2
             )
-            if dist < WAYPOINT_ARRIVAL_RADIUS_M or loop.time() > deadline:
+            if dist < arrival_radius_m or loop.time() > deadline:
                 break
 
     async def land(self) -> None:

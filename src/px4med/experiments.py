@@ -283,7 +283,7 @@ def main() -> None:
     parser.add_argument(
         "--speed-factor",
         type=float,
-        default=3.0,
+        default=2.0,
         help="For --backend sitl, scale PX4 cruise/max horizontal and vertical speeds",
     )
     parser.add_argument(

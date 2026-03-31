@@ -30,6 +30,9 @@ _ACTION_DELTAS = {
     2: (-1, 0),
     3: (1, 0),
 }
+_START_REPOSITION_TIMEOUT_S = 12.0
+_START_SETTLE_TIMEOUT_S = 10.0
+_START_SETTLE_RADIUS_CELLS = 1
 
 
 class Coordinator:
@@ -74,9 +77,11 @@ class Coordinator:
                 -start_grids[i][1] * mpc,   # north = -grid_y * mpc
                 start_grids[i][0] * mpc,    # east  =  grid_x * mpc
                 CRUISE_DOWN_M,
+                timeout_s=_START_REPOSITION_TIMEOUT_S,
             )
             for i in range(len(self.drones))
         ))
+        await self._wait_for_start_positions(start_grids)
 
         landed = [False, False]
         step = 0
@@ -250,6 +255,37 @@ class Coordinator:
         }
         logger.info("Episode %d complete: %s", episode, summary)
         return summary
+
+    async def _wait_for_start_positions(
+        self,
+        start_grids: list[tuple[int, int]],
+    ) -> None:
+        """Hold episode start until both drones are near the expected training grids."""
+        deadline = asyncio.get_running_loop().time() + _START_SETTLE_TIMEOUT_S
+        while True:
+            telems: list[Telemetry] = list(
+                await asyncio.gather(*(d.get_telemetry() for d in self.drones))
+            )
+            actual_grids = [
+                self.world.get_grid_pos(telem.north_m, telem.east_m)
+                for telem in telems
+            ]
+            if all(
+                abs(actual[0] - target[0]) + abs(actual[1] - target[1]) <= _START_SETTLE_RADIUS_CELLS
+                for actual, target in zip(actual_grids, start_grids)
+            ):
+                self.world.agent_grids = actual_grids
+                logger.info("Drones settled near start grids: %s", actual_grids)
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                logger.warning(
+                    "Timed out waiting for training start positions. expected=%s actual=%s",
+                    start_grids,
+                    actual_grids,
+                )
+                self.world.agent_grids = actual_grids
+                return
+            await asyncio.sleep(0.25)
 
     async def _dispatch(
         self,

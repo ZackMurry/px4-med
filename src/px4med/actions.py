@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 STEP_M: float = 2.0       # 1 grid cell = 2 m
-CRUISE_DOWN_M: float = -5.0  # NED down (negative = above ground, 5 m AGL)
+CRUISE_DOWN_M: float = -20.0  # NED down (negative = above ground, 20 m AGL)
 
 
 @dataclass(frozen=True)
