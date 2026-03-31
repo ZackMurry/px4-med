@@ -578,47 +578,39 @@ def run_parent(args: argparse.Namespace) -> int:
     logger.info("Output directory: %s", output_dir)
     logger.info("Plan: %s (%d jobs, seed base=%d)", PLAN_NAME, len(jobs), seed_base)
 
-    shared_dm: DockerManager | None = None
-    if not args.no_docker:
-        shared_dm = DockerManager(log_dir=output_dir / "sitl_logs")
-        logger.info("Starting shared PX4 SITL container for overnight run")
-        shared_dm.start()
-        asyncio.run(shared_dm.wait_healthy())
-
     started = time.time()
     completed_ids = load_completed_job_ids(output_dir)
 
-    try:
-        for job in jobs:
-            elapsed = time.time() - started
-            if elapsed >= args.max_hours * 3600.0:
-                logger.warning("Reached max runtime budget of %.1f hours", args.max_hours)
-                break
+    for job in jobs:
+        elapsed = time.time() - started
+        if elapsed >= args.max_hours * 3600.0:
+            logger.warning("Reached max runtime budget of %.1f hours", args.max_hours)
+            break
 
-            job_dir = output_dir / "jobs" / job.job_id
-            attempts_dir = job_dir / "attempts"
-            attempts_dir.mkdir(parents=True, exist_ok=True)
-            heartbeat_path = job_dir / "heartbeat.json"
+        job_dir = output_dir / "jobs" / job.job_id
+        attempts_dir = job_dir / "attempts"
+        attempts_dir.mkdir(parents=True, exist_ok=True)
+        heartbeat_path = job_dir / "heartbeat.json"
 
-            if job.job_id in completed_ids:
-                logger.info("Skipping completed job %s", job.job_id)
-                continue
+        if job.job_id in completed_ids:
+            logger.info("Skipping completed job %s", job.job_id)
+            continue
 
-            logger.info(
-                "Starting job %s [%d/%d]: %s/%s/%s episode=%d seed=%d",
-                job.job_id,
-                job.order,
-                len(jobs),
-                job.suite,
-                job.scenario,
-                job.policy,
-                job.episode,
-                job.seed,
-            )
+        logger.info(
+            "Starting job %s [%d/%d]: %s/%s/%s episode=%d seed=%d",
+            job.job_id,
+            job.order,
+            len(jobs),
+            job.suite,
+            job.scenario,
+            job.policy,
+            job.episode,
+            job.seed,
+        )
 
-            job_success = False
-            try:
-                for attempt in range(1, 4):
+        job_success = False
+        try:
+            for attempt in range(1, 4):
                     attempt_dir = attempts_dir / f"attempt_{attempt:02d}"
                     if attempt_dir.exists():
                         shutil.rmtree(attempt_dir)
@@ -689,25 +681,45 @@ def run_parent(args: argparse.Namespace) -> int:
                     env = os.environ.copy()
                     env.setdefault("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
 
+                    attempt_dm: DockerManager | None = None
                     with attempt_log.open("w", encoding="utf-8") as log_handle:
-                        process = subprocess.Popen(
-                            cmd,
-                            cwd=Path(__file__).resolve().parents[1],
-                            stdout=log_handle,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            env=env,
-                        )
-                        exit_code, reason, duration_s = monitor_attempt(
-                            process=process,
-                            job=job,
-                            attempt=attempt,
-                            heartbeat_path=heartbeat_path,
-                            output_dir=output_dir,
-                            timeout_s=args.episode_timeout_min * 60.0,
-                            heartbeat_timeout_s=args.heartbeat_timeout_s,
-                            log_interval_s=args.monitor_interval_s,
-                        )
+                        try:
+                            if not args.no_docker:
+                                attempt_dm = DockerManager(log_dir=output_dir / "sitl_logs")
+                                logger.info(
+                                    "Starting fresh PX4 SITL container for job %s attempt %d",
+                                    job.job_id,
+                                    attempt,
+                                )
+                                attempt_dm.start()
+                                asyncio.run(attempt_dm.wait_healthy())
+
+                            process = subprocess.Popen(
+                                cmd,
+                                cwd=Path(__file__).resolve().parents[1],
+                                stdout=log_handle,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                env=env,
+                            )
+                            exit_code, reason, duration_s = monitor_attempt(
+                                process=process,
+                                job=job,
+                                attempt=attempt,
+                                heartbeat_path=heartbeat_path,
+                                output_dir=output_dir,
+                                timeout_s=args.episode_timeout_min * 60.0,
+                                heartbeat_timeout_s=args.heartbeat_timeout_s,
+                                log_interval_s=args.monitor_interval_s,
+                            )
+                        finally:
+                            if attempt_dm is not None:
+                                logger.info(
+                                    "Stopping PX4 SITL container for job %s attempt %d",
+                                    job.job_id,
+                                    attempt,
+                                )
+                                attempt_dm.stop()
 
                     row = {
                         "timestamp": now_iso(),
@@ -766,62 +778,47 @@ def run_parent(args: argparse.Namespace) -> int:
                         exit_code,
                         reason,
                     )
-                    if shared_dm is not None:
-                        try:
-                            restart_shared_sitl(shared_dm)
-                        except Exception as exc:
-                            logger.exception(
-                                "Shared SITL restart failed after job %s attempt %d: %s",
-                                job.job_id,
-                                attempt,
-                                exc,
-                            )
-            except Exception as exc:
-                logger.exception("Unexpected parent-side failure while running job %s: %s", job.job_id, exc)
+        except Exception as exc:
+            logger.exception("Unexpected parent-side failure while running job %s: %s", job.job_id, exc)
 
-            if not job_success:
-                logger.error("Abandoning job %s after 3 failed attempts", job.job_id)
-                write_manifest_row(
-                    output_dir,
-                    {
-                        "timestamp": now_iso(),
-                        "plan": PLAN_NAME,
-                        "job_id": job.job_id,
-                        "suite": job.suite,
-                        "scenario": job.scenario,
-                        "policy": job.policy,
-                        "episode": job.episode,
-                        "seed": job.seed,
-                        "attempt": 3,
-                        "exit_code": "",
-                        "duration_s": "",
-                        "status": "abandoned",
-                        "reason": "3 failed attempts",
-                        "log_path": "",
-                    },
-                )
-                write_job_status(
-                    job_dir,
-                    {
-                        "job_id": job.job_id,
-                        "status": "abandoned",
-                        "attempt": 3,
-                        "updated_at": now_iso(),
-                    },
-                )
-                update_live_status(
-                    output_dir,
-                    {
-                        "job_id": job.job_id,
-                        "status": "abandoned",
-                        "updated_at": now_iso(),
-                    },
-                )
-    finally:
-        if shared_dm is not None:
-            logger.info("Stopping shared PX4 SITL container")
-            shared_dm.stop()
-
+        if not job_success:
+            logger.error("Abandoning job %s after 3 failed attempts", job.job_id)
+            write_manifest_row(
+                output_dir,
+                {
+                    "timestamp": now_iso(),
+                    "plan": PLAN_NAME,
+                    "job_id": job.job_id,
+                    "suite": job.suite,
+                    "scenario": job.scenario,
+                    "policy": job.policy,
+                    "episode": job.episode,
+                    "seed": job.seed,
+                    "attempt": 3,
+                    "exit_code": "",
+                    "duration_s": "",
+                    "status": "abandoned",
+                    "reason": "3 failed attempts",
+                    "log_path": "",
+                },
+            )
+            write_job_status(
+                job_dir,
+                {
+                    "job_id": job.job_id,
+                    "status": "abandoned",
+                    "attempt": 3,
+                    "updated_at": now_iso(),
+                },
+            )
+            update_live_status(
+                output_dir,
+                {
+                    "job_id": job.job_id,
+                    "status": "abandoned",
+                    "updated_at": now_iso(),
+                },
+            )
     refresh_aggregate_outputs(output_dir)
     logger.info("Overnight plan finished")
     return 0
