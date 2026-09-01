@@ -1,13 +1,31 @@
 # px4med
 
-Runs a trained CTDE multi-agent RL policy on two PX4 SITL drones. The scenario is a two-UAV medical delivery task with dynamic patient triage using a policy trained in a custom gym environment. This repo deploys it via MAVSDK against real PX4 SITL instances running in Docker.
+Runs the trained CEDA-FGCS-PX4 CTDE multi-agent RL policy on five PX4 SITL
+drones. The scenario is a five-UAV medical delivery mission with up to 50
+dynamically spawning patients, triage acuity progression, wind/low-signal
+hazards, and a mission-energy ledger, on a 100×100 abstract grid. This repo
+deploys the policy via MAVSDK against real PX4 SITL instances running in
+Docker.
 
-Both drones run as separate PX4 SITL instances inside a single Docker container, sharing one headless Gazebo session. The Python control loop connects to each instance over MAVSDK, polls telemetry at ~2 Hz, rebuilds the training environment's state vector, and dispatches waypoint commands based on the policy's greedy action output.
+All drones run as separate PX4 SITL instances inside a single Docker
+container, sharing one headless Gazebo server (started directly — no
+per-container rebuild). The Python control loop connects to each instance over
+MAVSDK, polls telemetry at ~2 Hz, rebuilds the training environment's dict
+observation (`src/px4med/fgcs_state.py`), and dispatches waypoint commands
+from the policy's masked greedy action output.
+
+The model package lives in `models/` (`CEDA-FGCS.py` loader + checkpoint +
+contract README). Verify it with:
+
+```bash
+python3 models/CEDA-FGCS.py --device cpu --show-metadata --smoke-test
+```
 
 ## Requirements
 
 - Docker
-- Python 3.11 with Poetry
+- Python 3.11+ with Poetry (torch comes from the system installation via
+  `system-site-packages`; see the note in `pyproject.toml`)
 
 ## Running
 
@@ -15,50 +33,43 @@ Both drones run as separate PX4 SITL instances inside a single Docker container,
 # install deps
 poetry install
 
-# run simulation (sets up docker image for you)
-poetry run px4med
+# run one SITL episode (sets up the docker container for you)
+poetry run px4med --episodes 1
+
+# skip the Docker lifecycle if SITL is already running externally
+poetry run px4med --no-docker --episodes 1
 ```
 
-If you already have SITL running externally (e.g. for debugging), skip the Docker lifecycle:
+PX4 console output is discarded by default to avoid filling storage
+(`PX4_VERBOSE_LOGS=1` in the container env re-enables it), onboard ULog
+logging is disabled (`SDLOG_MODE=-1`), and per-instance log dirs are deleted
+after each container stop.
+
+## Offline sanity checks (no SITL)
 
 ```bash
-poetry run px4med --no-docker --episodes 1
+# policy + world + observation builder end-to-end rollout
+poetry run python scripts/offline_rollout.py --episodes 1
+
+# directional/landing probes (catches coordinate-convention bugs)
+poetry run python scripts/probe_directions.py
 ```
 
 ## Validation Experiments
 
-Run the offline validation suite to generate CSV tables and matplotlib figures:
-
-```bash
-poetry run px4med-experiments
-```
-
-Results are written to `results/validation_<timestamp>/` with:
-
-- `tables/episodes.csv`: per-episode metrics
-- `tables/summary.csv`: aggregated means and 95% CIs
-- `tables/<suite>_summary.csv`: suite-specific tables
-- `figures/*.png`: paper-ready validation plots
-
-Useful options:
-
-```bash
-# run a smaller smoke version
-poetry run px4med-experiments --episodes 5
-
-# run only selected suites
-poetry run px4med-experiments --suite baseline_comparison --suite triage_priority
-
-# choose a custom output directory
-poetry run px4med-experiments --output-dir results/paper_validation
-```
+The experiment suites (`px4med-experiments`, `px4med-overnight-validation`)
+are still being ported from the previous 2-drone model and are not currently
+runnable.
 
 ## Ports
 
-| Drone | Sim TCP | MAVSDK UDP |
-| ----- | ------- | ---------- |
-| 0     | 4560    | 14540      |
-| 1     | 4561    | 14541      |
+| Drone | MAVSDK UDP | MAV_SYS_ID |
+| ----- | ---------- | ---------- |
+| 0     | 14540      | 1          |
+| 1     | 14541      | 2          |
+| 2     | 14542      | 3          |
+| 3     | 14543      | 4          |
+| 4     | 14544      | 5          |
 
 ## Tests
 
@@ -66,4 +77,4 @@ poetry run px4med-experiments --output-dir results/paper_validation
 poetry run pytest
 ```
 
-Most tests are pure unit tests and don't need SITL. `test_state_matches_training_env` requires `AneeshMARL5.py` in the repo root.
+All tests are pure unit tests and don't need SITL or the model checkpoint.

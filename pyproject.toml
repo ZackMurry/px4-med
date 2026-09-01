@@ -8,7 +8,10 @@ packages = [{include = "px4med", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-torch = ">=2.0.0"
+# torch is intentionally NOT managed by poetry: the CUDA wheel chain is ~8 GB
+# installed and repeatedly filled the disk. The venv is created with
+# system-site-packages (see poetry.toml), so the system python-pytorch
+# package provides torch.
 mavsdk = ">=1.4.0"
 numpy = ">=1.24.0"
 pyyaml = ">=6.0"

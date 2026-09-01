@@ -22,9 +22,9 @@ BASE_Z_VEL_UP_M_S = 3.0
 BASE_Z_VEL_DOWN_M_S = 1.5
 DEFAULT_SIM_BAT_DRAIN = 5000.0
 PX4_SIM_BAT_MIN_PCT = 10.0
-TELEMETRY_TIMEOUT_S = 10.0
-IN_AIR_TIMEOUT_S = 30.0
-LAND_TIMEOUT_S = 30.0
+TELEMETRY_TIMEOUT_S = 30.0
+IN_AIR_TIMEOUT_S = 90.0
+LAND_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -51,12 +51,15 @@ class Drone:
         self.grpc_port = grpc_port if grpc_port is not None else 50051 + drone_id
         self._system: Optional[System] = None
         self._offboard_active = False
+        self._last_battery_pct: float = 100.0
+        self._last_is_landed: bool = True
+        self._battery_skip_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self, timeout: float = 30.0) -> None:
+    async def connect(self, timeout: float = 180.0) -> None:
         """Connect to PX4 via MAVSDK and wait for a valid local position estimate."""
         from mavsdk import System
         # Use a dedicated gRPC port and MAVLink client sysid per drone so
@@ -85,18 +88,110 @@ class Drone:
                 f"{timeout:.0f}s ({self.mavsdk_address})"
             )
 
-        # Wait for local position (EKF converged) — required before offboard
+        # Ask PX4 for steady telemetry stream rates up front, and re-request
+        # periodically below: if the backend attaches while PX4 mavlink is
+        # still initializing, the one-shot requests get lost.
+        await self._request_stream_rates()
+
+        # Gate on readiness. MAVSDK's health.is_local_position_ok can stay
+        # frozen at False forever on multi-instance boots even though the
+        # PX4-side EKF is fully converged (verified via px4-ekf2 status), so
+        # health is only tried briefly; the authoritative fallback check is a
+        # live, stable LOCAL_POSITION_NED stream — which is also exactly what
+        # the control loop consumes.
+        health_budget = min(90.0, timeout / 2)
+        healthy = False
+        last_log = 0.0
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(health_budget):
                 async for health in self._system.telemetry.health():
-                    if health.is_local_position_ok:
+                    if health.is_local_position_ok and health.is_home_position_ok:
+                        healthy = True
                         logger.info(
-                            "Drone %d: local position estimate ready", self.drone_id
+                            "Drone %d: local position + home position ready",
+                            self.drone_id,
                         )
                         break
+                    now = asyncio.get_running_loop().time()
+                    if now - last_log > 30.0:
+                        last_log = now
+                        await self._request_stream_rates()
+                        logger.info(
+                            "Drone %d: waiting on health gyro=%s accel=%s mag=%s "
+                            "local=%s global=%s home=%s",
+                            self.drone_id,
+                            health.is_gyrometer_calibration_ok,
+                            health.is_accelerometer_calibration_ok,
+                            health.is_magnetometer_calibration_ok,
+                            health.is_local_position_ok,
+                            health.is_global_position_ok,
+                            health.is_home_position_ok,
+                        )
+        except TimeoutError:
+            pass
+
+        if not healthy:
+            logger.warning(
+                "Drone %d: health flags frozen — falling back to direct "
+                "position-stream verification",
+                self.drone_id,
+            )
+            await self._verify_position_stream(timeout=timeout - health_budget)
+
+    async def _request_stream_rates(self) -> None:
+        """Request telemetry stream rates (best effort, idempotent)."""
+        assert self._system is not None
+        for setter, rate in (
+            ("set_rate_battery", 2.0),
+            ("set_rate_landed_state", 2.0),
+            ("set_rate_position_velocity_ned", 10.0),
+            ("set_rate_home", 1.0),
+            ("set_rate_position", 2.0),
+            ("set_rate_odometry", 5.0),
+            ("set_rate_gps_info", 1.0),
+        ):
+            try:
+                async with asyncio.timeout(5.0):
+                    await getattr(self._system.telemetry, setter)(rate)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug(
+                    "Drone %d: %s(%s) failed: %s", self.drone_id, setter, rate, exc
+                )
+
+    async def _verify_position_stream(self, timeout: float) -> None:
+        """Confirm a live, stable NED position stream (EKF output flowing)."""
+        assert self._system is not None
+        samples: list[tuple[float, float, float]] = []
+        try:
+            async with asyncio.timeout(timeout):
+                async for pv in self._system.telemetry.position_velocity_ned():
+                    p = pv.position
+                    if not all(
+                        math.isfinite(v) for v in (p.north_m, p.east_m, p.down_m)
+                    ):
+                        samples.clear()
+                        continue
+                    samples.append((p.north_m, p.east_m, p.down_m))
+                    if len(samples) >= 10:
+                        spread = max(
+                            abs(a - b)
+                            for axis in range(3)
+                            for a, b in [(samples[0][axis], samples[-1][axis])]
+                        )
+                        if spread < 2.0:
+                            logger.info(
+                                "Drone %d: position stream verified "
+                                "(%d samples, spread %.2f m)",
+                                self.drone_id,
+                                len(samples),
+                                spread,
+                            )
+                            return
+                        samples.pop(0)
         except TimeoutError:
             raise TimeoutError(
-                f"Drone {self.drone_id}: no local position estimate after {timeout:.0f}s"
+                f"Drone {self.drone_id}: no stable position stream after "
+                f"{timeout:.0f}s (health also not ok)"
             )
 
     async def _next_stream_value(
@@ -117,10 +212,29 @@ class Drone:
             ) from exc
         raise RuntimeError(f"Drone {self.drone_id}: {label} stream closed unexpectedly")
 
-    async def arm(self) -> None:
+    async def arm(self, retry_window_s: float = 90.0) -> None:
+        """Arm, retrying while PX4 finishes preflight checks (COMMAND_DENIED)."""
         assert self._system is not None, "call connect() first"
-        await self._system.action.arm()
-        logger.info("Drone %d: armed", self.drone_id)
+        from mavsdk.action import ActionError
+
+        deadline = asyncio.get_running_loop().time() + retry_window_s
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._system.action.arm()
+                logger.info("Drone %d: armed (attempt %d)", self.drone_id, attempt)
+                return
+            except ActionError as exc:
+                if asyncio.get_running_loop().time() > deadline:
+                    raise
+                logger.warning(
+                    "Drone %d: arm attempt %d denied (%s), retrying ...",
+                    self.drone_id,
+                    attempt,
+                    exc._result.result_str if hasattr(exc, "_result") else exc,
+                )
+                await asyncio.sleep(2.0)
 
     async def configure_speed_profile(self, speed_factor: float = 1.0) -> None:
         """Scale PX4 horizontal/vertical speed limits for faster SITL runs."""
@@ -192,6 +306,9 @@ class Drone:
             )
 
         sim_bat_min_pct = 100.0 if drain_rate <= 0.0 else PX4_SIM_BAT_MIN_PCT
+        # Disable onboard ULog flight logging — .ulg files (~15 MB per flight
+        # per drone) were filling the mounted log volume across long runs.
+        await _set_int("SDLOG_MODE", -1)
         await _set_int("COM_LOW_BAT_ACT", 0)
         await _set_float("COM_ARM_BAT_MIN", 0.0)
         await _set_int("COM_ARM_WO_GPS", 2)
@@ -322,21 +439,42 @@ class Drone:
         )
         pos = pos_vel.position
 
-        bat = await self._next_stream_value(
-            self._system.telemetry.battery(),
-            timeout=TELEMETRY_TIMEOUT_S,
-            label="battery telemetry",
-        )
-        # MAVSDK v3.x returns remaining_percent as 0–100 (not 0–1)
-        battery_pct = bat.remaining_percent
+        # Battery is diagnostic (the mission-energy ledger lives in the world
+        # model). A stalled stream falls back to the last known value, and a
+        # stall triggers a 30s read backoff — paying a 5s timeout on every
+        # step drags the control loop from ~2s to ~6s per step (this timed
+        # out a full episode on 2026-08-29).
+        now = asyncio.get_running_loop().time()
+        if now >= self._battery_skip_until:
+            try:
+                bat = await self._next_stream_value(
+                    self._system.telemetry.battery(),
+                    timeout=2.0,
+                    label="battery telemetry",
+                )
+                # MAVSDK v3.x returns remaining_percent as 0–100 (not 0–1)
+                self._last_battery_pct = bat.remaining_percent
+            except TimeoutError:
+                self._battery_skip_until = now + 30.0
+                logger.warning(
+                    "Drone %d: battery telemetry stalled, backing off 30s "
+                    "(last known %.1f%%)",
+                    self.drone_id,
+                    self._last_battery_pct,
+                )
+        battery_pct = self._last_battery_pct
 
         from mavsdk.telemetry import LandedState
-        state = await self._next_stream_value(
-            self._system.telemetry.landed_state(),
-            timeout=TELEMETRY_TIMEOUT_S,
-            label="landed state",
-        )
-        is_landed = state == LandedState.ON_GROUND
+        try:
+            state = await self._next_stream_value(
+                self._system.telemetry.landed_state(),
+                timeout=2.0,
+                label="landed state",
+            )
+            self._last_is_landed = state == LandedState.ON_GROUND
+        except TimeoutError:
+            self._last_is_landed = self._last_is_landed
+        is_landed = self._last_is_landed
 
         return Telemetry(
             north_m=pos.north_m,

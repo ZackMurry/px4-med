@@ -1,5 +1,5 @@
-"""Verifies action→waypoint mapping is correct and reversible."""
-from px4med.actions import action_to_offset, is_land_action, STEP_M
+"""Verifies action→waypoint mapping for the 6-action CEDA-FGCS space."""
+from px4med.actions import ACTION_HOVER, ACTION_LAND, action_to_offset, is_land_action, STEP_M
 import pytest
 
 
@@ -17,11 +17,17 @@ def test_move_actions_produce_offsets():
     assert e.d_east == STEP_M and e.d_north == 0.0
 
 
+def test_hover_is_zero_offset():
+    h = action_to_offset(ACTION_HOVER)
+    assert h.d_north == 0.0 and h.d_east == 0.0
+
+
 def test_land_action_raises():
     with pytest.raises(ValueError):
-        action_to_offset(4)
+        action_to_offset(ACTION_LAND)
 
 
 def test_is_land_action():
-    assert is_land_action(4)
+    assert is_land_action(ACTION_LAND)
+    assert not is_land_action(ACTION_HOVER)
     assert not is_land_action(0)

@@ -5,12 +5,18 @@ import argparse
 import asyncio
 import datetime
 import logging
+import os
 import signal
+import socket
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
 import yaml
+
+from .episode_budget import LANDING_GRACE_STEPS, MISSION_MAX_STEPS
 
 
 def main() -> None:
@@ -25,7 +31,7 @@ async def _async_main() -> None:
         help="Path to experiment YAML config (default: config/experiment.yaml)",
     )
     parser.add_argument(
-        "--model", type=Path, default=Path("models/agent_marl9.pth"),
+        "--model", type=Path, default=Path("models/ctde_agent_marl_FGCS.pth"),
         help="Path to trained .pth policy file",
     )
     parser.add_argument(
@@ -41,8 +47,16 @@ async def _async_main() -> None:
         help="Skip Docker container lifecycle (assumes SITL already running)",
     )
     parser.add_argument(
-        "--max-steps", type=int, default=800,
-        help="Maximum steps per episode (default: 800)",
+        "--num-drones", type=int, default=5,
+        help="Number of PX4 SITL drones (default: 5)",
+    )
+    parser.add_argument(
+        "--max-steps", type=int, default=MISSION_MAX_STEPS,
+        help=(
+            "Mission step budget = the env's rescue deadline; must match the "
+            f"training config (default: {MISSION_MAX_STEPS}). The driver loop "
+            f"additionally gets {LANDING_GRACE_STEPS} landing-grace steps."
+        ),
     )
     parser.add_argument(
         "--speed-factor", type=float, default=3.0,
@@ -80,33 +94,37 @@ async def _async_main() -> None:
     from .coordinator import Coordinator
     from .docker_manager import DockerManager
     from .drone import Drone
-    from .environment import WorldEnvironment
+    from .true_world import TrueWorld
+    from .fgcs_policy import FGCSPolicy
     from .metrics import EpisodeRecord, MetricsCollector
-    from .policy import PolicyNet
 
     dm: Optional[DockerManager] = None
     drones: list[Drone] = []
     metrics: Optional[MetricsCollector] = None
 
+    from .boot import check_ports_free, settle_and_gate
+    check_ports_free(args.num_drones)
+
     try:
         # ── Docker lifecycle ──────────────────────────────────────────────
         if not args.no_docker:
-            dm = DockerManager(log_dir=args.log_dir)
+            dm = DockerManager(log_dir=args.log_dir, num_drones=args.num_drones)
             logger.info("Starting PX4 SITL container ...")
             dm.start()
-            logger.info("Waiting for both drones to be ready ...")
+            logger.info("Waiting for all drones to be ready ...")
             await dm.wait_healthy()
             logger.info("SITL healthy.")
 
         # ── Connect drones ────────────────────────────────────────────────
         addresses = dm.mavsdk_addresses if dm else [
-            f"udpin://0.0.0.0:{14540 + i}" for i in range(2)
+            f"udpin://0.0.0.0:{14540 + i}" for i in range(args.num_drones)
         ]
         drones = [Drone(i, addresses[i], grpc_port=50051 + i) for i in range(len(addresses))]
+        await settle_and_gate(dm, len(addresses))
+
         logger.info("Connecting to %d drone(s) ...", len(drones))
-        # Connect sequentially to avoid concurrent MAVSDK backend startup races.
         for d in drones:
-            await d.connect()
+            await d.connect(timeout=300.0)
         logger.info("All drones connected.")
         logger.info("Applying PX4 battery drain rate %.2f ...", args.battery_drain_rate)
         for d in drones:
@@ -117,11 +135,18 @@ async def _async_main() -> None:
             await d.configure_speed_profile(args.speed_factor)
 
         # ── Load policy ───────────────────────────────────────────────────
-        policy = PolicyNet(args.model)
+        policy = FGCSPolicy(weights_path=args.model)
         logger.info("Policy loaded from %s (device=%s)", args.model, policy.device)
 
         # ── World + metrics ───────────────────────────────────────────────
-        world = WorldEnvironment(config)
+        config["num_drones"] = args.num_drones
+        # Keep the env's rescue deadline and the obs time feature aligned with
+        # the requested budget (see experiments.MISSION_MAX_STEPS).
+        mission_cfg = dict(config.get("mission") or {})
+        mission_cfg["max_steps"] = args.max_steps
+        mission_cfg.setdefault("landing_grace_steps", LANDING_GRACE_STEPS)
+        config["mission"] = mission_cfg
+        world = TrueWorld(config)
         run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         metrics = MetricsCollector(args.log_dir)
         metrics.open(run_id)
@@ -137,7 +162,8 @@ async def _async_main() -> None:
 
             logger.info("═══ Episode %d / %d ═══", ep + 1, args.episodes)
             summary = await coordinator.run_episode(
-                episode=ep, max_steps=args.max_steps
+                episode=ep,
+                max_steps=args.max_steps + LANDING_GRACE_STEPS,
             )
 
             metrics.log_episode(EpisodeRecord(
@@ -146,7 +172,9 @@ async def _async_main() -> None:
                 patients_delivered=summary["patients_delivered"],
                 patients_died=summary["patients_died"],
                 patients_spawned=summary["patients_spawned"],
-                both_landed=summary["both_landed"],
+                all_landed=summary["all_landed"],
+                drones_landed=summary["drones_landed"],
+                drones_depleted=summary["drones_depleted"],
                 battery_remaining=summary["battery_remaining"],
                 simulated_battery_remaining=summary["simulated_battery_remaining"],
                 total_reward=summary["total_reward"],
@@ -155,6 +183,7 @@ async def _async_main() -> None:
                 low_signal_entries=summary["low_signal_entries"],
                 obstacle_collisions=summary["obstacle_collisions"],
                 agent_collisions=summary["agent_collisions"],
+                wrong_land_attempts=summary["wrong_land_attempts"],
             ))
             logger.info(
                 "Episode %d result: delivered=%d/%d died=%d eff=%.2f reward=%.2f steps=%d",
@@ -173,6 +202,18 @@ async def _async_main() -> None:
         logger.exception("Fatal error — attempting graceful shutdown")
 
     finally:
+        # If asyncio loop teardown wedges on MAVSDK backend tasks (observed),
+        # force-exit after cleanup — but first reap child mavsdk_server
+        # processes, since os._exit alone orphans them and they keep ports
+        # 1454x bound for the next run.
+        def _hard_exit() -> None:
+            import os
+            import subprocess as sp
+            sp.run(["pkill", "-9", "-P", str(os.getpid()), "mavsdk_server"],
+                   capture_output=True)
+            os._exit(0)
+
+        threading.Timer(45.0, _hard_exit).start()
         # Land all drones before stopping containers
         for i, drone in enumerate(drones):
             try:

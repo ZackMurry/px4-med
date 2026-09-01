@@ -1,0 +1,28 @@
+<frozen importlib._bootstrap>:491: RuntimeWarning: Your system is avx2 capable but pygame was not built with support for it. The performance of some of your blits could be adversely affected. Consider enabling compile time detection with environment variables like PYGAME_DETECT_AVX2=1 if you are compiling without cross compilation.
+pygame 2.6.1 (SDL 2.32.70, Python 3.14.5)
+Hello from the pygame community. https://www.pygame.org/contribute.html
+2026-08-31 21:18:05,713 INFO [ 10/200] nominal/learned                elapsed 0.7 min, eta 14.0 min
+2026-08-31 21:18:50,013 INFO [ 20/200] nominal/learned                elapsed 1.5 min, eta 13.3 min
+2026-08-31 21:19:34,005 INFO [ 30/200] nominal/learned                elapsed 2.2 min, eta 12.5 min
+2026-08-31 21:20:15,540 INFO [ 40/200] nominal/learned                elapsed 2.9 min, eta 11.6 min
+2026-08-31 21:20:57,580 INFO [ 50/200] nominal/learned                elapsed 3.6 min, eta 10.8 min
+2026-08-31 21:22:52,275 INFO [ 60/200] nominal/priority_path                elapsed 5.5 min, eta 12.9 min
+2026-08-31 21:25:00,926 INFO [ 70/200] nominal/priority_path                elapsed 7.7 min, eta 14.2 min
+2026-08-31 21:27:04,883 INFO [ 80/200] nominal/priority_path                elapsed 9.7 min, eta 14.6 min
+2026-08-31 21:29:16,879 INFO [ 90/200] nominal/priority_path                elapsed 11.9 min, eta 14.6 min
+2026-08-31 21:31:30,104 INFO [100/200] nominal/priority_path                elapsed 14.1 min, eta 14.1 min
+2026-08-31 21:43:09,001 INFO [110/200] nominal/nearest_path                elapsed 25.8 min, eta 21.1 min
+2026-08-31 21:54:32,113 INFO [120/200] nominal/nearest_path                elapsed 37.2 min, eta 24.8 min
+2026-08-31 22:06:33,607 INFO [130/200] nominal/nearest_path                elapsed 49.2 min, eta 26.5 min
+2026-08-31 22:18:28,558 INFO [140/200] nominal/nearest_path                elapsed 61.1 min, eta 26.2 min
+2026-08-31 22:30:06,492 INFO [150/200] nominal/nearest_path                elapsed 72.8 min, eta 24.3 min
+2026-08-31 22:30:36,765 INFO [160/200] nominal/random                elapsed 73.3 min, eta 18.3 min
+2026-08-31 22:31:07,977 INFO [170/200] nominal/random                elapsed 73.8 min, eta 13.0 min
+2026-08-31 22:31:38,435 INFO [180/200] nominal/random                elapsed 74.3 min, eta 8.3 min
+2026-08-31 22:32:09,159 INFO [190/200] nominal/random                elapsed 74.8 min, eta 3.9 min
+2026-08-31 22:32:40,245 INFO [200/200] nominal/random                elapsed 75.3 min, eta 0.0 min
+2026-08-31 22:32:40,293 INFO Wrote 200 episodes to /home/zack/px4-med/results/offline_sweep_baseline_comparison_20260831_211720 in 75.3 min
+2026-08-31 22:32:40,307 INFO   nominal            learned       n=50  deliv=0.966 +-0.010  triage=0.968 +-0.010  wind_avoid=0.979
+2026-08-31 22:32:40,307 INFO   nominal            nearest_path  n=50  deliv=0.948 +-0.018  triage=0.948 +-0.019  wind_avoid=0.531
+2026-08-31 22:32:40,307 INFO   nominal            priority_path n=50  deliv=0.389 +-0.022  triage=0.419 +-0.023  wind_avoid=0.527
+2026-08-31 22:32:40,307 INFO   nominal            random        n=50  deliv=0.020 +-0.006  triage=0.021 +-0.007  wind_avoid=0.645

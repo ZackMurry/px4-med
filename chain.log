@@ -1,0 +1,17 @@
+=== [chain 2026-08-31 00:09:48] chain starting
+=== [chain 2026-08-31 00:09:48] scrubbing between stages
+=== [chain 2026-08-31 00:09:54] starting stage: hazard -> results/hazard_20260830_104103 (log hazard_run.log)
+=== [chain 2026-08-31 06:06:36] stage hazard exited rc=0; completed jobs: 16
+=== [chain 2026-08-31 06:06:36] stage hazard marked complete
+=== [chain 2026-08-31 06:06:36] scrubbing between stages
+=== [chain 2026-08-31 06:06:41] starting stage: extend -> results/extend_20260831_000000 (log extend_run.log)
+=== [chain 2026-08-31 16:19:24] stage extend exited rc=0; completed jobs: 27
+=== [chain 2026-08-31 16:19:24] stage extend marked complete
+=== [chain 2026-08-31 16:19:24] scrubbing between stages
+=== [chain 2026-08-31 16:19:29] starting stage: latency -> results/latency_20260831_000000 (log latency_run.log)
+=== [chain 2026-08-31 21:17:14] stage latency exited rc=0; completed jobs: 11
+=== [chain 2026-08-31 21:17:14] stage latency marked complete
+=== [chain 2026-08-31 21:17:14] scrubbing between stages
+=== [chain 2026-08-31 21:17:19] starting offline sweep (n=50, baseline_comparison/nominal)
+=== [chain 2026-08-31 22:32:40] offline sweep exited rc=0
+=== [chain 2026-08-31 22:32:40] chain complete

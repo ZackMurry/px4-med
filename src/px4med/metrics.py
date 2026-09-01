@@ -1,11 +1,10 @@
 """Per-step and per-episode telemetry collection. Outputs jsonlines files.
 
-Mirrors Data_Collection from AneeshMARL5.py but writes structured records
-incrementally rather than accumulating lists in memory.
+Writes structured records incrementally rather than accumulating in memory.
+Per-drone quantities are stored as index-aligned lists (drone 0..N-1).
 """
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -33,12 +32,9 @@ class StepRecord:
     episode: int
     step: int
     timestamp: float
-    drone0_north: float
-    drone0_east: float
-    drone0_battery: float
-    drone1_north: float
-    drone1_east: float
-    drone1_battery: float
+    drone_north: list[float]
+    drone_east: list[float]
+    drone_battery: list[float]
     actions: list[int]
     deliveries: list[int]  # patient indices delivered this step
     rewards: list[float]
@@ -60,7 +56,9 @@ class EpisodeRecord:
     patients_delivered: int
     patients_died: int
     patients_spawned: int
-    both_landed: bool
+    all_landed: bool
+    drones_landed: int
+    drones_depleted: int
     battery_remaining: list[float]
     simulated_battery_remaining: list[float]
     total_reward: float
@@ -69,6 +67,7 @@ class EpisodeRecord:
     low_signal_entries: list[int]
     obstacle_collisions: int
     agent_collisions: int
+    wrong_land_attempts: int
 
 
 class MetricsCollector:
